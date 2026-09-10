@@ -1,0 +1,28 @@
+# 실행 산출물 — 매 실행마다 새로 생기고 프롬프트 전문이 들어 있다.
+# 대표 결과를 남기고 싶으면 해당 폴더만 `git add -f` 하면 된다.
+n8n/runs/*
+!n8n/runs/_check/
+n8n/runs/_check/*
+!n8n/runs/_check/prompt.txt
+
+# n8n 데이터베이스는 ~/.n8n 에 있어 이 저장소 밖이지만, 혹시 복사해 오더라도 막는다.
+# credential 이 암호화돼 들어 있다.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# 자격증명이 박힌 워크플로 사본. tools/reapply.py 가 만드는 중간 산출물이며
+# credential id 가 들어가므로 커밋하지 않는다.
+*-with-creds.json
+mvp-from-db.json
+
+# 편집기·OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+~$*
+
+# 파이썬
+__pycache__/
+*.pyc

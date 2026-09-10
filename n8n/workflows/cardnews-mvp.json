@@ -1,0 +1,786 @@
+{
+  "id": "cardnewsMvp0001",
+  "name": "카드뉴스 MVP — 조사에서 스토리보드까지",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "path": "cardnews",
+        "formTitle": "카드뉴스 만들기",
+        "formDescription": "주제를 넣으면 유튜브와 웹에서 자료를 모아 옵니다. 무엇을 쓸지는 다음 화면에서 직접 고릅니다.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "주제",
+              "fieldName": "topic",
+              "placeholder": "여행 기념품 추천",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "조사 기간",
+              "fieldName": "period",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "최근 7일"
+                  },
+                  {
+                    "option": "최근 30일"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "용도와 독자",
+              "fieldName": "purpose",
+              "fieldType": "textarea",
+              "placeholder": "캐리어 플랫폼 인스타 계정 — 여행 준비하는 20~30대"
+            }
+          ]
+        },
+        "options": {
+          "buttonLabel": "조사 시작"
+        }
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -240,
+        0
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000001",
+      "name": "카드뉴스 시작",
+      "webhookId": "cardnews-start-form"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst f = $input.first().json;\n\n// fieldName is honoured from typeVersion 2.4 up; fall back to the label anyway.\nconst topic   = String(f.topic   ?? f['주제'] ?? '').trim();\nconst purpose = String(f.purpose ?? f['용도와 독자'] ?? '').trim();\nconst period  = String(f.period  ?? f['조사 기간'] ?? '');\nif (!topic) throw new Error('주제가 비어 있습니다.');\n\nconst days = period.includes('30') ? 30 : 7;\nconst now = new Date();\nconst after = new Date(now.getTime() - days * 86400000);\n\n// Forward slashes on purpose: this string lives inside JSON, where a backslash\n// would become an escape sequence. Node accepts / on Windows.\nconst runDir = 'C:/Users/jb660/Desktop/project_2/n8n/runs/' + $execution.id;\nfs.mkdirSync(runDir, { recursive: true });\n\nreturn [{ json: {\n  topic, purpose, days,\n  projectId: $execution.id,\n  runDir,\n  publishedAfter: after.toISOString().split('.')[0] + 'Z',\n  tavilyRange: days === 30 ? 'month' : 'week',\n  researchedAt: now.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }),\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        0
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000002",
+      "name": "준비"
+    },
+    {
+      "parameters": {
+        "url": "https://www.googleapis.com/youtube/v3/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "part",
+              "value": "snippet"
+            },
+            {
+              "name": "type",
+              "value": "video"
+            },
+            {
+              "name": "maxResults",
+              "value": "25"
+            },
+            {
+              "name": "order",
+              "value": "relevance"
+            },
+            {
+              "name": "regionCode",
+              "value": "KR"
+            },
+            {
+              "name": "relevanceLanguage",
+              "value": "ko"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.topic }}"
+            },
+            {
+              "name": "publishedAfter",
+              "value": "={{ $json.publishedAfter }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        200,
+        -120
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000003",
+      "name": "유튜브 검색",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.tavily.com/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $json.topic, language: 'ko', filter_by_language: true, time_range: $json.tavilyRange, max_results: 20, search_depth: 'basic' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        200,
+        120
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000004",
+      "name": "웹 검색",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 2,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        420,
+        0
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000005",
+      "name": "소스 합치기"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst prep = $('준비').first().json;\n\nconst stripTags = s => String(s ?? '').replace(/<[^>]*>/g, '');\n// Unescape &amp; LAST, or \"&amp;lt;\" would decode twice.\nconst unescapeHtml = s => String(s ?? '')\n  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '\"')\n  .replace(/&#0?39;/g, \"'\").replace(/&apos;/g, \"'\").replace(/&nbsp;/g, ' ')\n  .replace(/&amp;/g, '&');\nconst clean = s => unescapeHtml(stripTags(s)).replace(/\\s+/g, ' ').trim();\n\n// The Code node sandbox has no URL or URLSearchParams — both throw\n// ReferenceError — so canonicalise by string. An earlier try/catch version\n// swallowed that error and silently stopped deduplicating anything.\nconst canon = (u) => {\n  const s = String(u ?? '').trim().split('#')[0];\n  if (!s) return '';\n  const yb = s.match(/^https?:\\/\\/(?:www\\.)?youtu\\.be\\/([A-Za-z0-9_-]+)/i);\n  if (yb) return 'https://www.youtube.com/watch?v=' + yb[1];\n  const qi = s.indexOf('?');\n  if (qi < 0) return s.replace(/\\/+$/, '');\n  const kept = s.slice(qi + 1).split('&')\n    .filter(p => p && !/^(utm_[^=]*|si|feature|fbclid|igshid|gclid)=/i.test(p));\n  return (kept.length ? s.slice(0, qi) + '?' + kept.join('&') : s.slice(0, qi)).replace(/\\/+$/, '');\n};\n\nconst hostOf = u => (String(u ?? '').match(/^https?:\\/\\/([^/?#]+)/i) || ['', ''])[1].replace(/^www\\./i, '');\n\nconst raw = [];\nconst sourceErrors = [];\n// Two tallies: what the API returned, and what survived the quality filters.\n// With only the second one, \"결과 0건\" blamed an empty API response even when\n// the API returned plenty and our own filters dropped every item — so the\n// screen told the user to just re-run, which could never help.\nconst apiCounts = { '유튜브': 0, '웹': 0 };\nconst counts = { '유튜브': 0, '웹': 0 };\n\nfor (const it of $input.all()) {\n  const j = it.json ?? {};\n  if (j.error) {\n    sourceErrors.push(clean(j.error.message ?? JSON.stringify(j.error)).slice(0, 200));\n    continue;\n  }\n  if (Array.isArray(j.items)) {                    // YouTube search.list\n    apiCounts['유튜브'] += j.items.length;\n    for (const v of j.items) {\n      const vid = v?.id?.videoId;\n      if (!vid) continue;\n      counts['유튜브']++;\n      const sn = v.snippet ?? {};\n      raw.push({\n        source: '유튜브', channel: clean(sn.channelTitle), title: clean(sn.title),\n        summary: clean(sn.description).slice(0, 300),\n        publishedAt: sn.publishedAt ? String(sn.publishedAt).slice(0, 10) : null,\n        url: 'https://www.youtube.com/watch?v=' + vid,\n      });\n    }\n  } else if (Array.isArray(j.results)) {           // Tavily\n    apiCounts['웹'] += j.results.length;\n    for (const r of j.results) {\n      if (!r?.url) continue;\n      // Tavily mixes in stubs with a one-word title and no body (\"기념품\").\n      // They would still eat a slot on the selection screen.\n      if (clean(r.title).length < 6 || clean(r.content).length < 20) continue;\n      // Instagram / TikTok / Facebook cannot be extracted by anything we have\n      // (verified: Tavily /extract returns failed_results for them), so they\n      // could never ground a card. Drop them instead of wasting a slot.\n      if (/(^|\\.)(instagram|tiktok|facebook|threads)\\.com$/i.test(hostOf(r.url))) continue;\n      counts['웹']++;\n      raw.push({\n        source: '웹', channel: hostOf(r.url), title: clean(r.title),\n        summary: clean(r.content).slice(0, 300),\n        publishedAt: r.published_date ? String(r.published_date).slice(0, 10) : null,\n        url: r.url,\n      });\n    }\n  }\n}\n\n// A source can answer 200 with an empty list, and it can also answer with\n// items that our filters then remove. Those need different advice: re-running\n// helps with the first and never helps with the second.\nif (counts['유튜브'] === 0) {\n  sourceErrors.push(apiCounts['유튜브'] > 0\n    ? '유튜브 ' + apiCounts['유튜브'] + '건이 왔지만 쓸 수 있는 영상이 없습니다 (영상이 아닌 채널·재생목록 결과).'\n    : '유튜브 결과 0건 — API 키, 또는 하루 100회 검색 쿼터를 확인하세요.');\n}\nif (counts['웹'] === 0) {\n  sourceErrors.push(apiCounts['웹'] > 0\n    ? '웹 ' + apiCounts['웹'] + '건이 왔지만 전부 걸러졌습니다 (제목 6자·본문 20자 미만이거나 인스타·틱톡). 다시 실행해도 같습니다 — 주제를 바꿔 보세요.'\n    : '웹 결과 0건 — Tavily가 같은 질의에도 간헐적으로 빈 응답을 줍니다. 다시 실행하면 대개 나옵니다.');\n}\n\n// same link -> one candidate\nconst byUrl = new Map();\nfor (const c of raw) {\n  const k = canon(c.url);\n  if (k && !byUrl.has(k)) byUrl.set(k, { ...c, url: k });\n}\n\n// same story -> one candidate.\n// ponytail: 제목 토큰 자카드 유사도. 오탐이 보이면 임베딩 비교로 교체\nconst toks = s => new Set(String(s).toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, ' ').split(' ').filter(w => w.length > 1));\nconst jac = (a, b) => {\n  const inter = [...a].filter(x => b.has(x)).length;\n  const uni = new Set([...a, ...b]).size;\n  return uni ? inter / uni : 0;\n};\n\n// Group within a source only. Across sources the titles overlap heavily on\n// the query words (\"여행 기념품 추천\"), so a blog post gets absorbed into a\n// video's group and the whole web source disappears from the shortlist --\n// a video and an article about the same thing are different material anyway.\nconst groups = [];\nfor (const c of byUrl.values()) {\n  const t = toks(c.title);\n  const hit = groups.find(g => g.item.source === c.source && jac(g.tokens, t) >= 0.6);\n  if (hit) { hit.also.push(c.url); continue; }\n  groups.push({ tokens: t, item: c, also: [] });\n}\n\n// Round-robin across sources before capping. Taking the first 12 outright\n// would drop the web source entirely, because YouTube returns 25 hits and\n// merges first -- which is exactly what happened on the first live run.\nconst bySrc = new Map();\nfor (const g of groups) {\n  if (!bySrc.has(g.item.source)) bySrc.set(g.item.source, []);\n  bySrc.get(g.item.source).push(g);\n}\nconst queues = [...bySrc.values()];\nconst picked = [];\nwhile (picked.length < 12 && queues.some(q => q.length)) {\n  for (const q of queues) {\n    if (!q.length) continue;\n    picked.push(q.shift());\n    if (picked.length >= 12) break;\n  }\n}\n\nconst candidates = picked.map((g, i) => ({ id: 'c' + (i + 1), ...g.item, duplicates: g.also.length }));\n\nif (!candidates.length) {\n  throw new Error('후보가 0개입니다. 검색 오류: ' + (sourceErrors.join(' / ')\n    || '없음 — 검색은 됐으나 결과가 비었습니다. 주제를 바꾸거나 기간을 30일로 넓혀 보세요.'));\n}\n\nconst prompt = [\n  '너는 카드뉴스 조사 보조다. 아래는 \"' + prep.topic + '\" 주제로 최근 ' + prep.days + '일 안에서 모은 후보다.',\n  prep.purpose ? '이 카드뉴스의 용도와 독자: ' + prep.purpose : '',\n  '',\n  '각 후보마다 두 가지를 한 줄씩 붙여라.',\n  '- value: 카드뉴스 소재로 고를 만한 이유',\n  '- uncertainty: 제목과 요약만으로는 확인되지 않는 점 (날짜 미확인, 광고·협찬 의심, 출처 불명 등)',\n  '',\n  '규칙:',\n  '- 후보에 없는 사실을 지어내지 마라. 제목과 요약에서 읽히는 것만 쓴다.',\n  '- 웹 검색을 하지 마라. 이 단계는 주어진 목록만 평가한다.',\n  '- 아래 JSON 하나만 출력하고 다른 문장은 쓰지 마라.',\n  '',\n  '{\"status\":\"result\",\"candidates\":[{\"id\":\"c1\",\"value\":\"...\",\"uncertainty\":\"...\"}]}',\n  '',\n  '후보:',\n  JSON.stringify(candidates.map(c => ({\n    id: c.id, source: c.source, channel: c.channel, title: c.title,\n    publishedAt: c.publishedAt ?? '미확인', summary: c.summary,\n  })), null, 1),\n].join('\\n');\n\nconst promptFile = prep.runDir + '/prompt-1.txt';\nfs.writeFileSync(promptFile, prompt, 'utf8');\nfs.writeFileSync(prep.runDir + '/candidates-raw.json', JSON.stringify(candidates, null, 2), 'utf8');\n\nreturn [{ json: { ...prep, candidates, sourceErrors, promptFile } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        0
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000006",
+      "name": "후보 정리"
+    },
+    {
+      "parameters": {
+        "command": "=powershell -NoProfile -ExecutionPolicy Bypass -File \"C:/Users/jb660/Desktop/project_2/n8n/scripts/ask-claude.ps1\" -PromptFile \"{{ $json.promptFile }}\""
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        860,
+        0
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000007",
+      "name": "Claude: 후보 평가"
+    },
+    {
+      "parameters": {
+        "jsCode": "const prev = $('후보 정리').first().json;\n\n// ask-claude.ps1 hands over {sessionId, body} on success and\n// {status:'error', reason, detail} on failure.\nlet out;\ntry { out = JSON.parse($json.stdout); }\ncatch (e) { throw new Error('래퍼 출력을 JSON으로 읽지 못했습니다: ' + String($json.stdout).slice(0, 400)); }\nif (out.status === 'error') {\n  throw new Error('Claude 실패 (' + out.reason + '): ' + String(out.detail ?? '').slice(0, 300));\n}\nconst res = out.body ?? {};\n\nconst notes = new Map((res.candidates ?? []).map(c => [c.id, c]));\nconst candidates = prev.candidates.map(c => ({\n  ...c,\n  value: notes.get(c.id)?.value ?? '',\n  uncertainty: notes.get(c.id)?.uncertainty ?? '',\n}));\n\n// The html field is the one place n8n does NOT escape for us.\nconst he = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')\n  .replace(/>/g, '&gt;').replace(/\"/g, '&quot;');\nconst cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };\n\nconst head = '<p><b>조사 기준</b> ' + he(prev.researchedAt) + ' · 최근 ' + prev.days + '일 · 후보 ' + candidates.length + '개</p>'\n  + (prev.sourceErrors.length\n      ? '<p><b>소스 상태</b> ' + prev.sourceErrors.map(e => he(e)).join('<br>') + '</p>'\n      : '');\n\nconst list = candidates.map(c =>\n  '<p><b>' + he(c.id) + '. ' + he(c.title) + '</b><br>'\n  + he(c.source) + (c.channel ? ' · ' + he(c.channel) : '')\n  + ' · ' + he(c.publishedAt ?? '날짜 미확인')\n  + (c.duplicates ? ' · 같은 소재 ' + c.duplicates + '건 묶임' : '')\n  + '<br>' + he(c.summary)\n  + (c.value ? '<br><b>고를 이유</b> ' + he(c.value) : '')\n  + (c.uncertainty ? '<br><b>불확실</b> ' + he(c.uncertainty) : '')\n  + '<br><a href=\"' + he(c.url) + '\" target=\"_blank\">원문 보기</a></p>'\n).join('');\n\nconst fields = [\n  { fieldLabel: '조사 결과', fieldType: 'html', html: head + list },\n  {\n    fieldLabel: '카드뉴스로 만들 것 (1~3개)', fieldName: 'picks', fieldType: 'checkbox',\n    fieldOptions: { values: candidates.map(c => ({ option: cut(c.title, 60) + ' — ' + c.id })) },\n    requiredField: true, limitSelection: 'range', minSelections: 1, maxSelections: 3,\n  },\n];\n\n// n8n resolves this expression through String.replace, where $ starts a\n// replacement pattern. Double it so a $ in a title survives intact.\nconst formFields = JSON.stringify(fields).split('$').join('$$');\n\nreturn [{ json: { ...prev, candidates, sessionId: out.sessionId, formFields } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        0
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000008",
+      "name": "후보 화면 만들기"
+    },
+    {
+      "parameters": {
+        "operation": "page",
+        "defineForm": "json",
+        "jsonOutput": "={{ $json.formFields }}",
+        "options": {
+          "buttonLabel": "이걸로 만들기"
+        }
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        1300,
+        0
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000009",
+      "name": "후보 선택",
+      "webhookId": "cardnews-form-9"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst prev = $('후보 화면 만들기').first().json;\n\nconst picked = $json.picks ?? $json['카드뉴스로 만들 것 (1~3개)'] ?? [];\nconst arr = Array.isArray(picked) ? picked : [picked];\n// The option text carries the id as a suffix, because n8n form options allow\n// exactly one key and have no separate value field.\nconst ids = arr.map(s => (String(s).match(/—\\s*(c\\d+)\\s*$/) || [])[1]).filter(Boolean);\nconst chosen = prev.candidates.filter(c => ids.includes(c.id));\nif (!chosen.length) throw new Error('선택한 후보를 찾지 못했습니다: ' + JSON.stringify(arr));\n\nfs.writeFileSync(prev.runDir + '/selection.json', JSON.stringify(chosen, null, 2), 'utf8');\n\n// Split the picks by how their text can actually be retrieved. Asking the\n// model to open these pages does not work: Naver and Instagram refuse the\n// fetch and YouTube renders its description with JS, so every card came back\n// with 미확인. We hold both API keys, so fetch the text ourselves.\n//\n// Route by what the URL IS, not by which search found it: Tavily also returns\n// YouTube links, and canon() rewrites youtu.be to watch?v=, so a candidate can\n// carry source='웹' and still be a video. Deciding by source label sent those\n// to both endpoints and then threw the fetched text away.\nconst videoIdOf = u =>\n  (String(u ?? '').match(/(?:[?&]v=|youtu\\.be\\/)([A-Za-z0-9_-]{6,})/) || [])[1] ?? null;\n\n// Resolve the id once here and carry it on the candidate, so 심층조사 지시\n// matches on the same value instead of re-deriving it with its own copy of\n// the regex — two copies would silently drift apart.\nconst withVid = chosen.map(c => ({ ...c, videoId: videoIdOf(c.url) }));\n\nconst videoIds = [...new Set(withVid.map(c => c.videoId).filter(Boolean))];\nconst webUrls = [...new Set(withVid.filter(c => !c.videoId).map(c => c.url))];\n\nreturn [{ json: { ...prev, chosen: withVid, videoIds: videoIds.join(','), webUrls } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        0
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000010",
+      "name": "선택 정리"
+    },
+    {
+      "parameters": {
+        "url": "https://www.googleapis.com/youtube/v3/videos",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "part",
+              "value": "snippet,statistics"
+            },
+            {
+              "name": "id",
+              "value": "={{ $json.videoIds }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1740,
+        -110
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000011",
+      "name": "유튜브 원문",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.tavily.com/extract",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ urls: $('선택 정리').first().json.webUrls, extract_depth: 'basic' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1960,
+        -110
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000012",
+      "name": "웹 원문",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst prev = $('선택 정리').first().json;\nconst chosen = prev.chosen;\n\nconst cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n) + ' …(이하 생략)' : s; };\n\n// Full descriptions from videos.list (search.list truncates them).\nconst vids = new Map();\ntry {\n  for (const it of ($('유튜브 원문').first().json.items ?? [])) {\n    vids.set(it.id, {\n      title: it.snippet?.title ?? '',\n      description: it.snippet?.description ?? '',\n      channel: it.snippet?.channelTitle ?? '',\n      publishedAt: it.snippet?.publishedAt ?? '',\n      views: it.statistics?.viewCount ?? null,\n    });\n  }\n} catch (e) { /* node errored; handled as 미확인 below */ }\n\n// Page text from Tavily /extract.\nconst pages = new Map();\nlet extractFailed = [];\ntry {\n  const j = $('웹 원문').first().json;\n  for (const r of (j.results ?? [])) pages.set(r.url, String(r.raw_content ?? ''));\n  extractFailed = (j.failed_results ?? []).map(f => f.url ?? String(f));\n} catch (e) { /* node errored; handled as 미확인 below */ }\n\nconst blocks = [];\nlet verified = 0;\nfor (const c of chosen) {\n  const vid = c.videoId;   // resolved once in 선택 정리\n  let body = '';\n  if (vid && vids.has(vid)) {\n    const v = vids.get(vid);\n    body = ['제목: ' + v.title,\n            '채널: ' + v.channel,\n            '게시일: ' + String(v.publishedAt).slice(0, 10),\n            v.views ? '조회수: ' + v.views : '',\n            '설명 전문:', v.description].filter(Boolean).join('\\n');\n  } else if (pages.has(c.url)) {\n    body = pages.get(c.url);\n  }\n  if (body.trim()) verified++;\n  blocks.push([\n    '### ' + c.id + ' ' + c.title,\n    'URL: ' + c.url,\n    body.trim() ? '원문 본문(실제로 가져온 것):' : '원문 본문: 가져오지 못했습니다. 이 후보는 미확인으로 다룬다.',\n    body.trim() ? cut(body, 8000) : '',\n  ].filter(Boolean).join('\\n'));\n}\n\nfs.writeFileSync(prev.runDir + '/sources-fetched.json', JSON.stringify({\n  verified, total: chosen.length, extractFailed,\n  blocks: blocks.map(b => b.length),\n}, null, 2), 'utf8');\n\nconst prompt = [\n  '너는 카드뉴스 편집자다. 아래 후보를 심층 조사하고 스토리보드를 만들어라.',\n  '',\n  '주제: ' + prev.topic,\n  prev.purpose ? '용도와 독자: ' + prev.purpose : '',\n  '조사 기준: ' + prev.researchedAt + ' 기준 최근 ' + prev.days + '일',\n  '',\n  '아래에 각 후보의 원문 본문을 실제로 가져와 붙였다 (' + verified + '/' + chosen.length + '건 확보).',\n  '유튜브는 videos.list의 설명 전문, 웹은 Tavily로 추출한 페이지 본문이다.',\n  '',\n  blocks.join('\\n\\n'),\n  '',\n  '절차:',\n  '1. 위 본문에서 구체적인 품목명을 뽑는다. 본문에 글자 그대로 있는 것만 뽑고, 정식 제품명을',\n  '   추측해 괄호로 덧붙이지 마라. 확인되지 않은 제품 동일시는 지어내기와 같다.',\n  '2. 각 품목을 WebSearch로 교차 확인한다. 검색어에 반드시 주제어(\"' + prev.topic + '\")를 함께 넣는다.',\n  '   품목명만 단독으로 검색하지 마라 — 쇼핑몰 상품페이지만 나와 검증이 되지 않는다.',\n  '3. 근거 등급을 아래 기준대로 엄격히 매긴다.',\n  '   - confirmed    : 서로 다른 개인 블로그·기사 2곳 이상이 이 주제 맥락에서 언급',\n  '   - weak         : 그런 출처가 1곳',\n  '   - retail_only  : 쇼핑몰 상품페이지만 나옴. 판매 사실만 확인된 것이며 추천 근거가 아니다',\n  '   - unconfirmed  : 못 찾음',\n  '4. 원문에 광고·협찬·제휴 표기가 있는지 확인한다. \"광고\", \"협찬\", \"수수료를 제공받습니다\",',\n  '   \"쇼핑 커넥트\", \"쿠팡 파트너스\", \"AD\", \"sponsored\" 등이 보이면 그 후보에서 나온 품목은',\n  '   반드시 제휴 콘텐츠 출처임을 밝히고 카드의 한계에도 적는다.',\n  '5. 카드 본문에 단언으로 쓸 수 있는 것은 confirmed 와 weak 뿐이다. weak 은 \"한 곳에서 언급\"',\n  '   처럼 범위를 밝혀 쓴다. retail_only 와 unconfirmed 는 카드의 주장 근거로 쓰지 마라.',\n  '6. 본문에 없는 가격·순위·수치를 채워 넣지 않는다. 재료가 부족하면 카드 수를 줄인다.',\n  '7. 본문을 못 가져온 후보는 근거를 \"미확인\"으로 적는다.',\n  '8. 대상 독자나 편집 방향에 따라 결과가 크게 달라질 때만 되묻는다.',\n  '',\n  '되물어야 하면 (정말 갈릴 때만, 한 번):',\n  '{\"status\":\"need_input\",\"question\":\"...\",\"options\":[\"...\",\"...\"],\"why\":\"이 답에 따라 무엇이 달라지는지 한 줄\"}',\n  '',\n  '만들 수 있으면:',\n  '{\"status\":\"result\",\"storyboard\":{\"audience\":\"...\",\"angle\":\"...\",\"hooks\":[\"...\",\"...\"],',\n  '\"items\":[{\"name\":\"본문에 있던 품목명 그대로\",\"from\":\"c1\",\"evidence\":\"confirmed|weak|retail_only|unconfirmed\",',\n  '\"affiliate\":true,\"query_used\":\"실제로 쓴 검색어\",\"sources\":[\"url\"]}],',\n  '\"cards\":[{\"no\":1,\"role\":\"표지\",\"title\":\"...\",\"body\":\"...\",\"source\":\"확인한 URL 또는 미확인\",',\n  '\"image_plan\":\"구도·분위기·색과 글자 넣을 빈 공간. 최종 문구는 그리지 않는다\"}]}}',\n  '',\n  '규칙:',\n  '- 카드는 5~8장. 표지는 관심을 끌고, 본문 카드는 하나의 핵심만, 마지막 카드는 요약 또는 다음 행동.',\n  '- 근거 없는 순위·수치·과장 금지. 확인하지 못한 숫자는 아예 쓰지 마라.',\n  '- 후킹 문구는 확인된 사실 범위 안에서만 쓴다.',\n  '- source에는 실제로 확인한 URL을 넣는다. 확인하지 못했으면 \"미확인\"이라고 적는다.',\n  '- JSON 하나만 출력하고 다른 문장은 쓰지 마라.',\n].join('\\n');\n\nconst promptFile = prev.runDir + '/prompt-2.txt';\nfs.writeFileSync(promptFile, prompt, 'utf8');\n\nreturn [{ json: { ...prev, chosen, promptFile } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2180,
+        -110
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000013",
+      "name": "심층조사 지시"
+    },
+    {
+      "parameters": {
+        "command": "=powershell -NoProfile -ExecutionPolicy Bypass -File \"C:/Users/jb660/Desktop/project_2/n8n/scripts/ask-claude.ps1\" -PromptFile \"{{ $json.promptFile }}\" -SessionId \"{{ $json.sessionId }}\""
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        -110
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000014",
+      "name": "Claude: 심층조사"
+    },
+    {
+      "parameters": {
+        "jsCode": "let out;\ntry { out = JSON.parse($json.stdout); }\ncatch (e) { throw new Error('래퍼 출력을 JSON으로 읽지 못했습니다: ' + String($json.stdout).slice(0, 400)); }\nif (out.status === 'error') {\n  throw new Error('Claude 실패 (' + out.reason + '): ' + String(out.detail ?? '').slice(0, 300));\n}\n\nconst res = out.body ?? {};\nif (res.status !== 'need_input' && res.status !== 'result') {\n  throw new Error('알 수 없는 status: ' + String(res.status) + ' / ' + JSON.stringify(res).slice(0, 300));\n}\n\n// Context comes from the first pass. runDir / sessionId / candidates do not\n// change when the question or revision loop sends execution back through here.\nconst ctx = $('심층조사 지시').first().json;\nreturn [{ json: { ...ctx, ...res, sessionId: out.sessionId || ctx.sessionId } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2620,
+        -110
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000015",
+      "name": "응답 파싱"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-16",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "need_input",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2840,
+        -110
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000016",
+      "name": "질문인가?"
+    },
+    {
+      "parameters": {
+        "operation": "page",
+        "defineForm": "json",
+        "jsonOutput": "={{ JSON.stringify([{fieldLabel:'왜 묻는지', fieldType:'html', html:'<p>' + String($json.why || '').replace(/[<>]/g,'') + '</p>'},{fieldLabel: String($json.question || '어느 쪽으로 갈까요?'), fieldName:'answer', fieldType:'radio', fieldOptions:{values: ($json.options || []).map(o => ({option: String(o)}))}, requiredField:true},{fieldLabel:'직접 입력 (위 선택 대신)', fieldName:'answerFree', fieldType:'textarea'}]).split('$').join('$$') }}",
+        "options": {
+          "buttonLabel": "답변 제출"
+        }
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        3060,
+        -300
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000017",
+      "name": "질문",
+      "webhookId": "cardnews-form-17"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst ctx = $('응답 파싱').first().json;\n\n// Same cap as the revision loop: this also runs back into Claude: 심층조사.\n// Claude is told to ask at most once, so a third question means it is stuck.\nconst MAX_QUESTIONS = 2;\nif ($runIndex >= MAX_QUESTIONS) {\n  throw new Error('질문이 ' + MAX_QUESTIONS + '회를 넘었습니다. 조사 재료가 부족해 '\n    + '스토리보드를 못 만들고 있습니다. 후보를 더 고르거나 주제를 좁혀 다시 실행하세요.');\n}\n\nconst free = String($json.answerFree ?? $json['직접 입력 (위 선택 대신)'] ?? '').trim();\nconst pick = String($json.answer ?? '').trim();\nconst answer = free || pick;\nif (!answer) throw new Error('답변이 비어 있습니다.');\n\nconst prompt = [\n  '앞서 네가 물은 질문: ' + String(ctx.question ?? ''),\n  '사용자 답변: ' + answer,\n  '',\n  '이 답변을 반영해 이어서 진행하라. 앞서 정한 규칙과 JSON 규약을 그대로 지킨다.',\n  '이제는 {\"status\":\"result\",\"storyboard\":{...}} 하나만 출력하라.',\n].join('\\n');\n\nconst promptFile = ctx.runDir + '/prompt-answer-' + Date.now() + '.txt';\nfs.writeFileSync(promptFile, prompt, 'utf8');\nreturn [{ json: { ...ctx, promptFile } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3280,
+        -300
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000018",
+      "name": "답변 전달"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst sb = $json.storyboard ?? {};\nconst cards = sb.cards ?? [];\nif (!cards.length) throw new Error('스토리보드에 카드가 없습니다.');\n\n// Park it on disk so the approval step reads back the exact version that was\n// shown, instead of guessing which run of this node the loop landed on.\nfs.writeFileSync($json.runDir + '/storyboard-latest.json', JSON.stringify(sb, null, 2), 'utf8');\n\nconst he = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')\n  .replace(/>/g, '&gt;').replace(/\"/g, '&quot;');\n\nconst html = '<p><b>독자</b> ' + he(sb.audience) + '<br><b>앵글</b> ' + he(sb.angle) + '</p>'\n  + ((sb.hooks ?? []).length\n      ? '<p><b>후킹 문구 후보</b></p><ul>' + sb.hooks.map(h => '<li>' + he(h) + '</li>').join('') + '</ul>'\n      : '')\n  + ((sb.items ?? []).length\n      ? '<p><b>품목 교차 확인</b></p><ul>' + sb.items.map(i =>\n          '<li>' + he(i.name) + ' — <b>' + he(i.evidence) + '</b>'\n          + (i.affiliate ? ' · <b>제휴/광고 출처</b>' : '')\n          + ((i.sources ?? []).length ? ' (' + i.sources.length + '곳)' : '') + '</li>').join('') + '</ul>'\n      : '')\n  + cards.map(c => '<p><b>' + he(c.no) + '. [' + he(c.role) + '] ' + he(c.title) + '</b><br>'\n      + he(c.body)\n      + '<br><b>근거</b> ' + he(c.source)\n      + '<br><b>그림 계획</b> ' + he(c.image_plan) + '</p>').join('');\n\nconst fields = [\n  { fieldLabel: '스토리보드 ' + cards.length + '장', fieldType: 'html', html },\n  { fieldLabel: '진행 여부', fieldName: 'decision', fieldType: 'radio',\n    fieldOptions: { values: [{ option: '승인' }, { option: '수정 요청' }] }, requiredField: true },\n  { fieldLabel: '수정 지시 (수정 요청일 때만)', fieldName: 'revision', fieldType: 'textarea' },\n];\n\nreturn [{ json: { ...$json, formFields: JSON.stringify(fields).split('$').join('$$') } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3060,
+        60
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000019",
+      "name": "스토리보드 화면 만들기"
+    },
+    {
+      "parameters": {
+        "operation": "page",
+        "defineForm": "json",
+        "jsonOutput": "={{ $json.formFields }}",
+        "options": {
+          "buttonLabel": "제출"
+        }
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        3280,
+        60
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000020",
+      "name": "스토리보드 승인",
+      "webhookId": "cardnews-form-20"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-21",
+              "leftValue": "={{ $json.decision ?? $json['진행 여부'] }}",
+              "rightValue": "승인",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3500,
+        60
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000021",
+      "name": "승인인가?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst ctx = $('응답 파싱').first().json;\nconst sb = JSON.parse(fs.readFileSync(ctx.runDir + '/storyboard-latest.json', 'utf8'));\nconst cards = sb.cards ?? [];\nconst chosen = ctx.chosen ?? [];\n\nfs.writeFileSync(ctx.runDir + '/storyboard.json', JSON.stringify(sb, null, 2), 'utf8');\n\nconst script = [\n  '# ' + ctx.topic,\n  '',\n  '- 독자: ' + (sb.audience ?? ''),\n  '- 앵글: ' + (sb.angle ?? ''),\n  '- 조사 기준: ' + ctx.researchedAt + ' 기준 최근 ' + ctx.days + '일',\n  '',\n  ...cards.map(c => [\n    '## ' + c.no + '. [' + c.role + '] ' + c.title,\n    '',\n    String(c.body ?? ''),\n    '',\n    '- 근거: ' + String(c.source ?? ''),\n    '- 그림 계획: ' + String(c.image_plan ?? ''),\n    '',\n  ].join('\\n')),\n].join('\\n');\nfs.writeFileSync(ctx.runDir + '/script.md', script, 'utf8');\n\nconst sources = [\n  '# 출처',\n  '',\n  '조사 기준: ' + ctx.researchedAt + ' 기준 최근 ' + ctx.days + '일',\n  '',\n  '## 선택한 후보',\n  '',\n  ...chosen.map(c => '- [' + c.title + '](' + c.url + ') — ' + c.source\n    + (c.channel ? ' · ' + c.channel : '') + ' · ' + (c.publishedAt ?? '날짜 미확인')),\n  '',\n  '## 카드별 근거',\n  '',\n  ...cards.map(c => '- ' + c.no + '. ' + String(c.source ?? '')),\n  '',\n  '## 품목 교차 확인',\n  '',\n  ...((sb.items ?? []).length\n    ? (sb.items ?? []).map(i => '- ' + i.name + ' — ' + i.evidence\n        + (i.affiliate ? ' · 제휴/광고 콘텐츠 출처' : '')\n        + (i.query_used ? ' · 검색어: ' + i.query_used : '')\n        + ((i.sources ?? []).length ? '\\n' + i.sources.map(u => '  - ' + u).join('\\n') : ''))\n    : ['(품목 추출 없음)']),\n  '',\n  'confirmed = 서로 다른 블로그·기사 2곳 이상 / weak = 1곳 / retail_only = 쇼핑몰 페이지만 / unconfirmed = 못 찾음',\n  '',\n  '이미지는 아직 만들지 않았습니다. 이미지 출처와 생성 기록은 다음 단계에서 이 파일에 추가합니다.',\n].join('\\n');\nfs.writeFileSync(ctx.runDir + '/sources.md', sources, 'utf8');\n\nreturn [{ json: {\n  runDir: ctx.runDir, cards: cards.length,\n  files: 'storyboard.json, script.md, sources.md, selection.json, candidates-raw.json',\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3720,
+        -40
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000022",
+      "name": "저장"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst ctx = $('응답 파싱').first().json;\n\n// Cap the revision loop. It runs back into Claude: 심층조사, and each pass is\n// a paid call with no natural end — a user who keeps clicking 수정 요청 can\n// spin it forever. The storyboard shown on screen is already on disk, so\n// stopping here loses nothing but the final script.md / sources.md.\nconst MAX_REVISIONS = 3;\nif ($runIndex >= MAX_REVISIONS) {\n  throw new Error('수정 요청이 ' + MAX_REVISIONS + '회를 넘었습니다. 마지막 스토리보드는 '\n    + $('응답 파싱').first().json.runDir + '/storyboard-latest.json 에 있습니다. '\n    + '방향을 바꾸려면 주제나 후보를 다시 골라 새로 실행하세요.');\n}\n\nconst instruction = String($json.revision ?? $json['수정 지시 (수정 요청일 때만)'] ?? '').trim();\nif (!instruction) throw new Error('수정 요청을 골랐으면 수정 지시를 적어 주세요.');\n\nconst prompt = [\n  '방금 제안한 스토리보드를 아래 지시대로 고쳐라.',\n  '',\n  '수정 지시: ' + instruction,\n  '',\n  '지시와 무관한 카드는 그대로 둔다. 규칙은 그대로다.',\n  '{\"status\":\"result\",\"storyboard\":{...}} JSON 하나만 출력하라.',\n].join('\\n');\n\nconst promptFile = ctx.runDir + '/prompt-revision-' + Date.now() + '.txt';\nfs.writeFileSync(promptFile, prompt, 'utf8');\nreturn [{ json: { ...ctx, promptFile } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3720,
+        200
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000023",
+      "name": "수정 지시"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "respondWith": "text",
+        "completionTitle": "카드뉴스 원고 완성",
+        "completionMessage": "={{ '카드 ' + $json.cards + '장.\\n저장 위치: ' + $json.runDir + '\\n파일: ' + $json.files }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        3940,
+        -40
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000024",
+      "name": "완료",
+      "webhookId": "cardnews-form-done"
+    }
+  ],
+  "connections": {
+    "카드뉴스 시작": {
+      "main": [
+        [
+          {
+            "node": "준비",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "준비": {
+      "main": [
+        [
+          {
+            "node": "유튜브 검색",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "웹 검색",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "유튜브 검색": {
+      "main": [
+        [
+          {
+            "node": "소스 합치기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "웹 검색": {
+      "main": [
+        [
+          {
+            "node": "소스 합치기",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "소스 합치기": {
+      "main": [
+        [
+          {
+            "node": "후보 정리",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "후보 정리": {
+      "main": [
+        [
+          {
+            "node": "Claude: 후보 평가",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude: 후보 평가": {
+      "main": [
+        [
+          {
+            "node": "후보 화면 만들기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "후보 화면 만들기": {
+      "main": [
+        [
+          {
+            "node": "후보 선택",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "후보 선택": {
+      "main": [
+        [
+          {
+            "node": "선택 정리",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "선택 정리": {
+      "main": [
+        [
+          {
+            "node": "유튜브 원문",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "유튜브 원문": {
+      "main": [
+        [
+          {
+            "node": "웹 원문",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "웹 원문": {
+      "main": [
+        [
+          {
+            "node": "심층조사 지시",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "심층조사 지시": {
+      "main": [
+        [
+          {
+            "node": "Claude: 심층조사",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude: 심층조사": {
+      "main": [
+        [
+          {
+            "node": "응답 파싱",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "응답 파싱": {
+      "main": [
+        [
+          {
+            "node": "질문인가?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "질문인가?": {
+      "main": [
+        [
+          {
+            "node": "질문",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "스토리보드 화면 만들기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "질문": {
+      "main": [
+        [
+          {
+            "node": "답변 전달",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "답변 전달": {
+      "main": [
+        [
+          {
+            "node": "Claude: 심층조사",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "스토리보드 화면 만들기": {
+      "main": [
+        [
+          {
+            "node": "스토리보드 승인",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "스토리보드 승인": {
+      "main": [
+        [
+          {
+            "node": "승인인가?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "승인인가?": {
+      "main": [
+        [
+          {
+            "node": "저장",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "수정 지시",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "수정 지시": {
+      "main": [
+        [
+          {
+            "node": "Claude: 심층조사",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "저장": {
+      "main": [
+        [
+          {
+            "node": "완료",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

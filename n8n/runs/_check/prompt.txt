@@ -1,0 +1,2 @@
+연결 확인용이다. 아래 JSON 하나만 출력하고 다른 문장은 쓰지 마라.
+{"status":"result","ok":true,"note":"Claude CLI 연결됨"}
