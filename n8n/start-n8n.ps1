@@ -32,7 +32,7 @@ if ($busy) {
   exit 1
 }
 
-. (Join-Path $root 'scriptsind-n8n.ps1')
+. (Join-Path $root 'scripts/find-n8n.ps1')
 $bin = Find-N8nBin
 
 Write-Host "runs dir : $($env:N8N_RESTRICT_FILE_ACCESS_TO)"

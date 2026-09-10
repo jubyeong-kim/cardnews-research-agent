@@ -540,21 +540,82 @@ fs.writeFileSync(runDir + '/items-checked.json', JSON.stringify(itemChecks, null
 return [{ json: { ...$json, itemChecks } }];
 """.strip()
 
+JS_SHOTS = r"""
+const sb = $json.storyboard ?? {};
+const items = sb.items ?? [];
+const checks = $json.itemChecks ?? [];
+
+// Only look for shots for items a card may actually use.
+const byName = new Map(checks.map(c => [c.name, c.verdict]));
+const usable = items.filter(i => {
+  const ev = String(i.evidence ?? '');
+  const vd = byName.get(String(i.name ?? '').trim());
+  return ['official', 'confirmed', 'weak'].includes(ev)
+    && ['in_source', 'head_only'].includes(vd);
+});
+
+// Same reason as elsewhere: n8n skips a node that gets no items, which would
+// stall the chain. One throwaway search out of 1000/month costs nothing.
+// ponytail: 빈 조회 1건. 크레딧이 빠듯해지면 IF 분기로 교체
+if (!usable.length) {
+  return [{ json: { storyboard: sb, itemChecks: checks, shotFor: null, shotQuery: 'placeholder', skip: true } }];
+}
+
+return usable.map(i => ({
+  json: {
+    storyboard: sb,
+    itemChecks: checks,
+    shotFor: i.name,
+    shotQuery: String(i.name).split(/[(（]/)[0].trim() + ' 제품',
+    skip: false,
+  },
+}));
+""".strip()
+
 JS_APPROVE_FORM = r"""
 const fs = require('fs');
 
 // 장소 확인 runs once per place, so $json here is a Maps response, not the
 // storyboard. Take both from 장소 추출, which carries the storyboard on every
 // item it emits and lines up index-for-index with the lookups.
-const sb = $json.storyboard ?? {};
+// 제품컷 검색 runs once per item, so $json here is a Tavily response. Take the
+// storyboard from 제품컷 찾기, which carries it on every item it emits and
+// lines up index-for-index with the searches.
+const asked = $('제품컷 찾기').all().map(i => i.json);
+const sb = asked[0]?.storyboard ?? {};
 const cards = sb.cards ?? [];
 if (!cards.length) throw new Error('스토리보드에 카드가 없습니다.');
 
-const itemChecks = $json.itemChecks ?? [];
+const itemChecks = asked[0]?.itemChecks ?? [];
+const runDir = $('선택 정리').first().json.runDir;
 
-// Park it on disk so 저장 reads back exactly what was approved, instead of
+let found = [];
+try { found = $('제품컷 검색').all().map(i => i.json); } catch (e) { /* node errored */ }
+
+// Tavily returns images for anything, including names that do not exist --
+// a probe for an invented product came back with 상쾌환 packs. So keep the
+// AI description next to each image: when it names a different product, the
+// mismatch is visible. This finds candidates; it does not clear their rights.
+const hostOf = u => (String(u ?? '').match(/^https?:\/\/([^/?#]+)/i) || ['', ''])[1].replace(/^www\./i, '');
+const shots = [];
+asked.forEach((a, idx) => {
+  if (a.skip || !a.shotFor) return;
+  const j = found[idx] ?? {};
+  const imgs = (j.images ?? []).slice(0, 3).map(x => (typeof x === 'string')
+    ? { url: x, desc: '' }
+    : { url: x.url ?? '', desc: String(x.description ?? '') });
+  shots.push({
+    name: a.shotFor,
+    query: a.shotQuery,
+    images: imgs,
+    pages: (j.results ?? []).slice(0, 3).map(r => ({ url: r.url ?? '', host: hostOf(r.url) })),
+  });
+});
+
+// Park these on disk so 저장 reads back exactly what was approved, instead of
 // guessing which run of this node the revision loop landed on.
-fs.writeFileSync($json.runDir + '/storyboard-latest.json', JSON.stringify(sb, null, 2), 'utf8');
+fs.writeFileSync(runDir + '/storyboard-latest.json', JSON.stringify(sb, null, 2), 'utf8');
+fs.writeFileSync(runDir + '/product-shots.json', JSON.stringify(shots, null, 2), 'utf8');
 
 const he = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -562,6 +623,17 @@ const he = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
 const html = '<p><b>독자</b> ' + he(sb.audience) + '<br><b>앵글</b> ' + he(sb.angle) + '</p>'
   + ((sb.hooks ?? []).length
       ? '<p><b>후킹 문구 후보</b></p><ul>' + sb.hooks.map(h => '<li>' + he(h) + '</li>').join('') + '</ul>'
+      : '')
+  + (shots.length
+      ? '<p><b>제품컷 후보</b> — 이용 조건은 출처 페이지에서 직접 확인하세요</p>'
+        + shots.map(s => '<p>' + he(s.name) + '<br>'
+            + (s.images.length
+                ? s.images.map(im => '<img src="' + he(im.url) + '" alt="' + he(s.name) + '">'
+                    + (im.desc ? '<br><span>' + he(im.desc.slice(0, 90)) + '</span>' : '')).join('<br>')
+                : '이미지 못 찾음')
+            + (s.pages.length ? '<br>출처: ' + s.pages.map(pg =>
+                '<a href="' + he(pg.url) + '" target="_blank">' + he(pg.host) + '</a>').join(' · ') : '')
+            + '</p>').join('')
       : '')
   + (itemChecks.length
       ? '<p><b>원문 대조</b> — 품목명이 우리가 가져온 원문에 실제로 있는지</p><ul>'
@@ -592,7 +664,7 @@ const fields = [
   { fieldLabel: '수정 지시 (수정 요청일 때만)', fieldName: 'revision', fieldType: 'textarea' },
 ];
 
-return [{ json: { ...$json, formFields: JSON.stringify(fields).split('$').join('$$') } }];
+return [{ json: { ...asked[0], shots, formFields: JSON.stringify(fields).split('$').join('$$') } }];
 """.strip()
 
 JS_REVISE = r"""
@@ -635,6 +707,10 @@ let itemChecks = [];
 try {
   itemChecks = JSON.parse(fs.readFileSync(ctx.runDir + '/items-checked.json', 'utf8'));
 } catch (e) { /* older run, or no items */ }
+let shots = [];
+try {
+  shots = JSON.parse(fs.readFileSync(ctx.runDir + '/product-shots.json', 'utf8'));
+} catch (e) { /* no usable items to look up */ }
 const cards = sb.cards ?? [];
 const chosen = ctx.chosen ?? [];
 
@@ -699,7 +775,18 @@ const sources = [
       : '이름 없음'))
     : ['(품목 없음)']),
   '',
-  '이미지는 아직 만들지 않았습니다. 이미지 출처와 생성 기록은 다음 단계에서 이 파일에 추가합니다.',
+  '## 제품컷 후보',
+  '',
+  '검색으로 모은 후보일 뿐이며 이용 허락을 받은 것이 아니다. 출처 페이지에서 조건을',
+  '직접 확인하고 쓸 것. 설명문이 다른 제품을 가리키면 검색이 빗나간 것이다.',
+  '',
+  ...(shots.length
+    ? shots.flatMap(sh => ['- ' + sh.name + ' (검색어: ' + sh.query + ')']
+        .concat((sh.images ?? []).map(im => '  - ' + im.url + (im.desc ? '\n    ' + im.desc : '')))
+        .concat((sh.pages ?? []).length ? ['  - 출처: ' + sh.pages.map(pg => pg.host).join(', ')] : []))
+    : ['(대상 품목 없음)']),
+  '',
+  '이미지 생성과 카드 렌더링은 아직 없습니다. 다음 단계에서 이 파일에 기록을 추가합니다.',
 ].join('\n');
 fs.writeFileSync(ctx.runDir + '/sources.md', sources, 'utf8');
 
@@ -850,15 +937,31 @@ nodes = [
 
     code('원문 대조', JS_SOURCECHECK, [3060, 60]),
 
-    code('스토리보드 화면 만들기', JS_APPROVE_FORM, [3500, 60]),
-    form_page('스토리보드 승인', '={{ $json.formFields }}', [3720, 60], '제출'),
+    code('제품컷 찾기', JS_SHOTS, [3280, 60]),
+
+    # Tavily returns image URLs plus an AI description of each. One call per
+    # item, which is what an n8n HTTP node does with multiple input items.
+    node('제품컷 검색', 'n8n-nodes-base.httpRequest', 4.5, {
+        'method': 'POST',
+        'url': 'https://api.tavily.com/search',
+        'authentication': 'genericCredentialType', 'genericAuthType': 'httpHeaderAuth',
+        'sendBody': True, 'specifyBody': 'json',
+        'jsonBody': "={{ JSON.stringify({ query: $json.shotQuery, max_results: 5,"
+                    " search_depth: 'basic', include_images: true,"
+                    " include_image_descriptions: true }) }}",
+        'options': {},
+    }, [3500, 60], {'onError': 'continueRegularOutput',
+                    'retryOnFail': True, 'maxTries': 3, 'waitBetweenTries': 2000}),
+
+    code('스토리보드 화면 만들기', JS_APPROVE_FORM, [3720, 60]),
+    form_page('스토리보드 승인', '={{ $json.formFields }}', [3940, 60], '제출'),
 
     node('승인인가?', 'n8n-nodes-base.if', 2.3,
          {'conditions': cond_equals("={{ $json.decision ?? $json['진행 여부'] }}", '승인'),
-          'options': {}}, [3940, 60]),
+          'options': {}}, [4160, 60]),
 
-    code('저장', JS_SAVE, [4160, -40]),
-    code('수정 지시', JS_REVISE, [4160, 200]),
+    code('저장', JS_SAVE, [4380, -40]),
+    code('수정 지시', JS_REVISE, [4380, 200]),
 
     node('완료', 'n8n-nodes-base.form', 2.5, {
         'operation': 'completion', 'respondWith': 'text',
@@ -866,7 +969,7 @@ nodes = [
         'completionMessage': "={{ '카드 ' + $json.cards + '장.\\n저장 위치: ' + $json.runDir"
                              " + '\\n파일: ' + $json.files }}",
         'options': {},
-    }, [4380, -40], {'webhookId': 'cardnews-form-done'}),
+    }, [4600, -40], {'webhookId': 'cardnews-form-done'}),
 ]
 
 
@@ -892,7 +995,9 @@ connections = {
     'Claude: 심층조사': {'main': [m('응답 파싱')]},
     '응답 파싱': {'main': [m('질문인가?')]},
     '질문인가?': {'main': [m('질문'), m('원문 대조')]},
-    '원문 대조': {'main': [m('스토리보드 화면 만들기')]},
+    '원문 대조': {'main': [m('제품컷 찾기')]},
+    '제품컷 찾기': {'main': [m('제품컷 검색')]},
+    '제품컷 검색': {'main': [m('스토리보드 화면 만들기')]},
     '질문': {'main': [m('답변 전달')]},
     '답변 전달': {'main': [m('Claude: 심층조사')]},
     '스토리보드 화면 만들기': {'main': [m('스토리보드 승인')]},
