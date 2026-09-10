@@ -374,6 +374,11 @@ fs.writeFileSync(prev.runDir + '/sources-fetched.json', JSON.stringify({
   blocks: blocks.map(b => b.length),
 }, null, 2), 'utf8');
 
+// Keep the raw material on disk. 원문 대조 reads it back to check that every
+// item Claude reports actually appears in what we fetched — the one check for
+// invention that needs no external service and cannot false-positive.
+fs.writeFileSync(prev.runDir + '/source-text.txt', blocks.join('\n\n'), 'utf8');
+
 const prompt = [
   '너는 카드뉴스 편집자다. 아래 후보를 심층 조사하고 스토리보드를 만들어라.',
   '',
@@ -391,35 +396,44 @@ const prompt = [
   '   추측해 괄호로 덧붙이지 마라. 확인되지 않은 제품 동일시는 지어내기와 같다.',
   '2. 각 품목을 WebSearch로 교차 확인한다. 검색어에 반드시 주제어("' + prev.topic + '")를 함께 넣는다.',
   '   품목명만 단독으로 검색하지 마라 — 쇼핑몰 상품페이지만 나와 검증이 되지 않는다.',
-  '3. 근거 등급을 아래 기준대로 엄격히 매긴다.',
+  '3. 각 품목에 itemType 을 붙인다. "장소"(가게·노포·백화점·테마파크처럼 지도에 찍히는 것)',
+  '   또는 "제품"(과자·화장품처럼 물건). 장소는 뒤에서 구글 지도로 실재를 따로 확인한다.',
+  '4. 근거 등급을 아래 기준대로 엄격히 매긴다.',
+  '   - official     : 관광국·지자체·발표기관·해당 브랜드 공식 사이트. 1곳이어도 단언해도 된다',
   '   - confirmed    : 서로 다른 개인 블로그·기사 2곳 이상이 이 주제 맥락에서 언급',
   '   - weak         : 그런 출처가 1곳',
   '   - retail_only  : 쇼핑몰 상품페이지만 나옴. 판매 사실만 확인된 것이며 추천 근거가 아니다',
   '   - unconfirmed  : 못 찾음',
-  '4. 원문에 광고·협찬·제휴 표기가 있는지 확인한다. "광고", "협찬", "수수료를 제공받습니다",',
+  '5. 원문에 광고·협찬·제휴 표기가 있는지 확인한다. "광고", "협찬", "수수료를 제공받습니다",',
   '   "쇼핑 커넥트", "쿠팡 파트너스", "AD", "sponsored" 등이 보이면 그 후보에서 나온 품목은',
   '   반드시 제휴 콘텐츠 출처임을 밝히고 카드의 한계에도 적는다.',
-  '5. 카드 본문에 단언으로 쓸 수 있는 것은 confirmed 와 weak 뿐이다. weak 은 "한 곳에서 언급"',
-  '   처럼 범위를 밝혀 쓴다. retail_only 와 unconfirmed 는 카드의 주장 근거로 쓰지 마라.',
-  '6. 본문에 없는 가격·순위·수치를 채워 넣지 않는다. 재료가 부족하면 카드 수를 줄인다.',
-  '7. 본문을 못 가져온 후보는 근거를 "미확인"으로 적는다.',
-  '8. 대상 독자나 편집 방향에 따라 결과가 크게 달라질 때만 되묻는다.',
+  '6. 카드 본문에 단언으로 쓸 수 있는 것은 official, confirmed, weak 이다.',
+  '   official 은 공식 출처이므로 그대로 단언해도 된다.',
+  '   weak 은 "오사카관광국에 따르면" 처럼 어디서 나온 말인지 문장에 밝혀 쓴다.',
+  '   retail_only 와 unconfirmed 는 카드의 주장 근거로 쓰지 마라.',
+  '7. 본문에 없는 가격·순위·수치를 채워 넣지 않는다. 재료가 부족하면 카드 수를 줄인다.',
+  '8. 본문을 못 가져온 후보는 근거를 "미확인"으로 적는다.',
+  '9. 대상 독자나 편집 방향에 따라 결과가 크게 달라질 때만 되묻는다.',
   '',
   '되물어야 하면 (정말 갈릴 때만, 한 번):',
   '{"status":"need_input","question":"...","options":["...","..."],"why":"이 답에 따라 무엇이 달라지는지 한 줄"}',
   '',
   '만들 수 있으면:',
   '{"status":"result","storyboard":{"audience":"...","angle":"...","hooks":["...","..."],',
-  '"items":[{"name":"본문에 있던 품목명 그대로","from":"c1","evidence":"confirmed|weak|retail_only|unconfirmed",',
+  '"items":[{"name":"본문에 있던 품목명 그대로","from":"c1","itemType":"장소|제품",',
+  '"evidence":"official|confirmed|weak|retail_only|unconfirmed",',
   '"affiliate":true,"query_used":"실제로 쓴 검색어","sources":["url"]}],',
-  '"cards":[{"no":1,"role":"표지","title":"...","body":"...","source":"확인한 URL 또는 미확인",',
+  '"cards":[{"no":1,"role":"표지","title":"...","body":"...",',
+  '"source":"확인한 URL / 미확인 / 해당 없음",',
   '"image_plan":"구도·분위기·색과 글자 넣을 빈 공간. 최종 문구는 그리지 않는다"}]}}',
   '',
   '규칙:',
   '- 카드는 5~8장. 표지는 관심을 끌고, 본문 카드는 하나의 핵심만, 마지막 카드는 요약 또는 다음 행동.',
   '- 근거 없는 순위·수치·과장 금지. 확인하지 못한 숫자는 아예 쓰지 마라.',
   '- 후킹 문구는 확인된 사실 범위 안에서만 쓴다.',
-  '- source에는 실제로 확인한 URL을 넣는다. 확인하지 못했으면 "미확인"이라고 적는다.',
+  '- source 는 셋 중 하나다. 확인한 URL / 재료를 못 가져와 확인 못 했으면 "미확인" /',
+  '  표지나 마무리처럼 새로운 사실을 주장하지 않는 카드는 "해당 없음". 주장이 없는 카드를',
+  '  "미확인"으로 적지 마라 — 검증 실패로 읽힌다.',
   '- JSON 하나만 출력하고 다른 문장은 쓰지 마라.',
 ].join('\n');
 
@@ -478,14 +492,68 @@ fs.writeFileSync(promptFile, prompt, 'utf8');
 return [{ json: { ...ctx, promptFile } }];
 """.strip()
 
+JS_SOURCECHECK = r"""
+const fs = require('fs');
+const sb = $json.storyboard ?? {};
+const items = sb.items ?? [];
+const runDir = $('선택 정리').first().json.runDir;
+
+// Does every item Claude reports actually appear in the material we fetched?
+//
+// This replaces an external place lookup. Both free options were tested and
+// both fail the same way: Nominatim answered "유니버설 스튜디오 재팬" with a
+// river in Russia, and Tavily returned Tabelog and osaka-info.jp pages for
+// shop names that were invented for the test. A check that says "실재 확인"
+// about a made-up shop is worse than no check at all.
+//
+// So ask the question we can actually answer. Every invention we have caught
+// -- the matcha-jp cards, the guessed "(케아나나데시코 모공 쌀팩)" -- was a
+// name that was not in the source text. This catches those, for products as
+// well as places, with no API and no possible false positive.
+// Its limit is equally clear: it cannot tell whether the SOURCE is wrong.
+// That axis belongs to the evidence grades.
+let sourceText = '';
+try { sourceText = fs.readFileSync(runDir + '/source-text.txt', 'utf8'); } catch (e) { }
+
+// Compare with spacing and punctuation removed: sources write 멜라노cc,
+// 멜라노CC, 멜라노 CC for the same thing.
+const norm = s => String(s ?? '').toLowerCase().replace(/[\s··・,.()（）\[\]{}"'`~!?\/\\|:;_+=-]+/g, '');
+const hay = norm(sourceText);
+
+const itemChecks = items.map(i => {
+  const name = String(i.name ?? '').trim();
+  const full = norm(name);
+  // "VC100 마스크팩 (퀄리티퍼스트 …)" — the head is the claim, the bracket is
+  // often the model's own guess at a formal product name.
+  const head = norm(name.split(/[(（]/)[0]);
+  let verdict;
+  if (!full) verdict = 'empty';
+  else if (!hay) verdict = 'no_source';
+  else if (hay.includes(full)) verdict = 'in_source';
+  else if (head && head !== full && hay.includes(head)) verdict = 'head_only';
+  else verdict = 'not_in_source';
+  return { name, itemType: i.itemType ?? '', evidence: i.evidence ?? '', verdict };
+});
+
+fs.writeFileSync(runDir + '/items-checked.json', JSON.stringify(itemChecks, null, 2), 'utf8');
+
+return [{ json: { ...$json, itemChecks } }];
+""".strip()
+
 JS_APPROVE_FORM = r"""
 const fs = require('fs');
+
+// 장소 확인 runs once per place, so $json here is a Maps response, not the
+// storyboard. Take both from 장소 추출, which carries the storyboard on every
+// item it emits and lines up index-for-index with the lookups.
 const sb = $json.storyboard ?? {};
 const cards = sb.cards ?? [];
 if (!cards.length) throw new Error('스토리보드에 카드가 없습니다.');
 
-// Park it on disk so the approval step reads back the exact version that was
-// shown, instead of guessing which run of this node the loop landed on.
+const itemChecks = $json.itemChecks ?? [];
+
+// Park it on disk so 저장 reads back exactly what was approved, instead of
+// guessing which run of this node the revision loop landed on.
 fs.writeFileSync($json.runDir + '/storyboard-latest.json', JSON.stringify(sb, null, 2), 'utf8');
 
 const he = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -495,9 +563,20 @@ const html = '<p><b>독자</b> ' + he(sb.audience) + '<br><b>앵글</b> ' + he(s
   + ((sb.hooks ?? []).length
       ? '<p><b>후킹 문구 후보</b></p><ul>' + sb.hooks.map(h => '<li>' + he(h) + '</li>').join('') + '</ul>'
       : '')
+  + (itemChecks.length
+      ? '<p><b>원문 대조</b> — 품목명이 우리가 가져온 원문에 실제로 있는지</p><ul>'
+        + itemChecks.map(v => '<li>' + he(v.name) + ' — '
+            + (v.verdict === 'in_source'     ? '원문에 있음'
+             : v.verdict === 'head_only'     ? '<b>괄호 앞만 원문에 있음 — 괄호 안은 모델 추측일 수 있음</b>'
+             : v.verdict === 'not_in_source' ? '<b>원문에 없음 — 카드에 쓰지 마세요</b>'
+             : v.verdict === 'no_source'     ? '원문을 못 가져와 대조 불가'
+             : '이름 없음')
+            + '</li>').join('') + '</ul>'
+      : '')
   + ((sb.items ?? []).length
       ? '<p><b>품목 교차 확인</b></p><ul>' + sb.items.map(i =>
           '<li>' + he(i.name) + ' — <b>' + he(i.evidence) + '</b>'
+          + (i.itemType ? ' · ' + he(i.itemType) : '')
           + (i.affiliate ? ' · <b>제휴/광고 출처</b>' : '')
           + ((i.sources ?? []).length ? ' (' + i.sources.length + '곳)' : '') + '</li>').join('') + '</ul>'
       : '')
@@ -552,6 +631,10 @@ JS_SAVE = r"""
 const fs = require('fs');
 const ctx = $('응답 파싱').first().json;
 const sb = JSON.parse(fs.readFileSync(ctx.runDir + '/storyboard-latest.json', 'utf8'));
+let itemChecks = [];
+try {
+  itemChecks = JSON.parse(fs.readFileSync(ctx.runDir + '/items-checked.json', 'utf8'));
+} catch (e) { /* older run, or no items */ }
 const cards = sb.cards ?? [];
 const chosen = ctx.chosen ?? [];
 
@@ -599,7 +682,22 @@ const sources = [
         + ((i.sources ?? []).length ? '\n' + i.sources.map(u => '  - ' + u).join('\n') : ''))
     : ['(품목 추출 없음)']),
   '',
-  'confirmed = 서로 다른 블로그·기사 2곳 이상 / weak = 1곳 / retail_only = 쇼핑몰 페이지만 / unconfirmed = 못 찾음',
+  'official = 관광국·기관·브랜드 공식 / confirmed = 블로그·기사 2곳 이상 / weak = 1곳 /',
+  'retail_only = 쇼핑몰 페이지만 / unconfirmed = 못 찾음',
+  '',
+  '## 원문 대조',
+  '',
+  '품목명이 실제로 가져온 원문에 있었는지. 외부 조회가 아니라 source-text.txt 와의 대조라',
+  '오탐이 없다. 대신 원문 자체가 틀린 경우는 잡지 못한다 — 그건 위 등급이 담당한다.',
+  '',
+  ...(itemChecks.length
+    ? itemChecks.map(v => '- ' + v.name + ' — ' + (
+        v.verdict === 'in_source'     ? '원문에 있음'
+      : v.verdict === 'head_only'     ? '괄호 앞만 원문에 있음 (괄호 안은 모델 추측 가능성)'
+      : v.verdict === 'not_in_source' ? '원문에 없음'
+      : v.verdict === 'no_source'     ? '원문을 못 가져와 대조 불가'
+      : '이름 없음'))
+    : ['(품목 없음)']),
   '',
   '이미지는 아직 만들지 않았습니다. 이미지 출처와 생성 기록은 다음 단계에서 이 파일에 추가합니다.',
 ].join('\n');
@@ -750,15 +848,17 @@ nodes = [
     form_page('질문', JS_QUESTION_FORM, [3060, -300], '답변 제출'),
     code('답변 전달', JS_ANSWER, [3280, -300]),
 
-    code('스토리보드 화면 만들기', JS_APPROVE_FORM, [3060, 60]),
-    form_page('스토리보드 승인', '={{ $json.formFields }}', [3280, 60], '제출'),
+    code('원문 대조', JS_SOURCECHECK, [3060, 60]),
+
+    code('스토리보드 화면 만들기', JS_APPROVE_FORM, [3500, 60]),
+    form_page('스토리보드 승인', '={{ $json.formFields }}', [3720, 60], '제출'),
 
     node('승인인가?', 'n8n-nodes-base.if', 2.3,
          {'conditions': cond_equals("={{ $json.decision ?? $json['진행 여부'] }}", '승인'),
-          'options': {}}, [3500, 60]),
+          'options': {}}, [3940, 60]),
 
-    code('저장', JS_SAVE, [3720, -40]),
-    code('수정 지시', JS_REVISE, [3720, 200]),
+    code('저장', JS_SAVE, [4160, -40]),
+    code('수정 지시', JS_REVISE, [4160, 200]),
 
     node('완료', 'n8n-nodes-base.form', 2.5, {
         'operation': 'completion', 'respondWith': 'text',
@@ -766,7 +866,7 @@ nodes = [
         'completionMessage': "={{ '카드 ' + $json.cards + '장.\\n저장 위치: ' + $json.runDir"
                              " + '\\n파일: ' + $json.files }}",
         'options': {},
-    }, [3940, -40], {'webhookId': 'cardnews-form-done'}),
+    }, [4380, -40], {'webhookId': 'cardnews-form-done'}),
 ]
 
 
@@ -791,7 +891,8 @@ connections = {
     '심층조사 지시': {'main': [m('Claude: 심층조사')]},
     'Claude: 심층조사': {'main': [m('응답 파싱')]},
     '응답 파싱': {'main': [m('질문인가?')]},
-    '질문인가?': {'main': [m('질문'), m('스토리보드 화면 만들기')]},
+    '질문인가?': {'main': [m('질문'), m('원문 대조')]},
+    '원문 대조': {'main': [m('스토리보드 화면 만들기')]},
     '질문': {'main': [m('답변 전달')]},
     '답변 전달': {'main': [m('Claude: 심층조사')]},
     '스토리보드 화면 만들기': {'main': [m('스토리보드 승인')]},
