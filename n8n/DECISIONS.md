@@ -165,17 +165,47 @@ if (Array.isArray(response)) { response.forEach((item) => returnItems.push(...))
 `심층조사 지시`가 응답을 못 읽으면 `videoErrors` 에 적고 넘어갑니다. 실패 내역은
 `runs/<실행번호>/sources-fetched.json` 의 `videoErrors` / `videoSkipped` 에 남습니다.
 
-### 같이 고친 것 — credential 추론이 키를 엉뚱한 곳으로 보낼 뻔했습니다
+### credential 추론이 Tavily 키를 구글로 보낼 뻔했습니다 — 두 번 고쳤습니다
 
 `tools/reapply.py` 는 새 HTTP 노드에 credential 을 **인증 방식으로 추론**해
-붙였습니다. Tavily 와 Gemini 가 **둘 다 Header Auth** 라서, 그대로 뒀으면 Gemini
+붙였습니다. Tavily 와 Gemini 가 **둘 다 Header Auth** 라 그대로 뒀으면 Gemini
 노드에 Tavily credential 이 붙어 `Authorization: Bearer tvly-...` 를
 `generativelanguage.googleapis.com` 으로 보냈을 것입니다. 401 로 끝나는 게 아니라
 **남의 서비스에 우리 키가 나가는** 문제입니다.
 
-이제 같은 인증 방식의 credential 이 **정확히 하나일 때만** 추론하고, 여럿이면
-비워 둔 채 어느 노드인지 이름을 찍어 경고합니다. 틀린 키를 붙이느니 비워 두는
-편이 낫습니다.
+**첫 수정은 모자랐습니다.** "같은 인증 방식이 여럿이면 추측하지 않는다" 로
+고쳤는데, 이 시점에 Header Auth credential 은 Tavily **하나뿐**이었습니다.
+그래서 "정확히 하나" 규칙이 통과해 버렸고, 실제 배포 로그가 그대로 찍었습니다.
+
+```
+credential 이어붙임: 유튜브 검색, 웹 검색, 유튜브 원문, 웹 원문, 제품컷 검색
+인증방식으로 추론: 제미나이 영상 분석(httpHeaderAuth)
+```
+
+**두 번째 수정이 맞습니다: 호스트로 맞춥니다.** credential 은 인증 방식이 아니라
+**서비스**에 속하고, 서비스를 가리키는 것은 호스트입니다. 이제 그 credential 이
+이미 쓰이던 호스트와 새 노드의 호스트가 같을 때만 추론합니다. 새 Tavily 노드
+(`api.tavily.com`)는 자동으로 붙고, Gemini 노드는 비운 채 경고합니다.
+
+```
+[!] credential 이 비어 있는 노드가 있습니다.
+    제미나이 영상 분석 -> generativelanguage.googleapis.com (httpHeaderAuth)
+```
+
+**키는 실제로 나가지 않았습니다.** 잘못 붙은 워크플로가 DB 에 들어간 뒤
+`execution_entity` 를 확인했고, 그 사이 `cardnewsMvp0001` 실행은 0건이었습니다
+(최근 실행은 전부 모의본이고 거기 Gemini 노드는 네트워크를 타지 않는 Code
+노드 스텁입니다). 붙은 credential 은 실행 전에 걷어냈습니다.
+
+**교훈.** "후보가 하나뿐이면 그게 맞겠지" 는 추론이 아니라 요행입니다. 후보 수를
+세지 말고 **맞는 근거**를 봐야 합니다.
+
+### 배포 경로를 스크립트로 만들었습니다 — `deploy.ps1`
+
+`workflows/cardnews-mvp.json` 은 credential 이 없는 템플릿이라 그냥 import 하면
+UI 에서 연결해 둔 키가 전부 날아갑니다. 안전한 순서(빌드 → DB 사본 내보내기 →
+`reapply.py` → `reactivate.ps1`)가 어디에도 적혀 있지 않고 제 머릿속에만
+있었습니다. 한 번에 하는 스크립트로 만들었습니다.
 
 `test-mock.ps1` 에 남아 있던 `npx --yes n8n` 도 고쳤습니다. 다른 두 스크립트에서
 이미 잡았던 1GB 재다운로드 버그가 이 파일에만 남아 있었습니다.
