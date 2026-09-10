@@ -21,6 +21,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $db = Join-Path $env:USERPROFILE '.n8n\database.sqlite'
+. (Join-Path $root 'scriptsind-n8n.ps1')
 
 function Stop-N8n {
   $busy = Get-NetTCPConnection -LocalPort 5678 -State Listen -ErrorAction SilentlyContinue
@@ -41,7 +42,11 @@ if ($Import) {
   $env:N8N_PORT = '5778'
   $env:N8N_RUNNERS_BROKER_PORT = '5779'
   Write-Host "가져오는 중: $Import"
-  & npx --yes n8n import:workflow --input="$Import" | Select-String 'Successfully|Error'
+  # Never `npx n8n` here: it re-resolves to the newest release and starts a
+  # ~1GB download, which is the stall start-n8n.ps1 exists to avoid.
+  $bin = Find-N8nBin
+  if (-not $bin) { throw 'npx 캐시에 n8n이 없습니다. 먼저 start-n8n.ps1 을 한 번 실행하세요.' }
+  & node $bin import:workflow --input="$Import" | Select-String 'Successfully|Error'
 }
 
 # --- 2. activate ----------------------------------------------------------

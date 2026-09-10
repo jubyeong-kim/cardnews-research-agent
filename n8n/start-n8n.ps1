@@ -32,20 +32,19 @@ if ($busy) {
   exit 1
 }
 
-$bin = Get-ChildItem "$env:LOCALAPPDATA\npm-cache\_npx\*\node_modules\n8n\bin\n8n" -ErrorAction SilentlyContinue |
-       Sort-Object LastWriteTime -Descending | Select-Object -First 1
+. (Join-Path $root 'scriptsind-n8n.ps1')
+$bin = Find-N8nBin
 
 Write-Host "runs dir : $($env:N8N_RESTRICT_FILE_ACCESS_TO)"
 Write-Host "editor   : http://localhost:5678"
 
 if ($bin) {
-  $pkg = Join-Path $bin.Directory.Parent.FullName 'package.json'
-  Write-Host "version  : n8n $((Get-Content $pkg -Raw | ConvertFrom-Json).version)  (npx 캐시)"
-  node $bin.FullName
+  Write-Host "version  : n8n $(Get-N8nVersion $bin)  (npx 캐시)"
+  node $bin
 }
 else {
   # First run on a fresh machine: let npx fetch it once, then the branch above
   # takes over on every later start.
-  Write-Host "npx 캐시에 n8n이 없습니다. 처음 한 번은 내려받습니다 (몇 분 걸립니다)."
+  Write-Host "npx 캐시에 완전한 n8n이 없습니다. 처음 한 번은 내려받습니다 (몇 분 걸립니다)."
   npx --yes n8n
 }
