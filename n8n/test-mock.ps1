@@ -14,7 +14,13 @@ $env:N8N_RUNNERS_BROKER_PORT = '5779'
 
 $wf = Join-Path $root 'workflows\cardnews-mock.json'
 
-npx --yes n8n import:workflow --input="$wf" | Out-Null
-npx --yes n8n execute --id=cardnewsMock001 2>&1 |
-  Select-String -Pattern 'Execution was|Execution error|"message":' |
-  Select-Object -First 10
+# Same reason as start-n8n.ps1: bare `npx n8n` re-resolves to the newest
+# release and re-downloads ~1GB. Use the cache that is already unpacked.
+. (Join-Path $root 'scripts/find-n8n.ps1')
+$bin = Find-N8nBin
+if (-not $bin) { throw 'npx 캐시에 n8n이 없습니다. 먼저 start-n8n.ps1 을 한 번 실행하세요.' }
+
+& node $bin import:workflow --input="$wf" | Out-Null
+& node $bin execute --id=cardnewsMock001 2>&1 |
+  Select-String -Pattern '\[모의\]|Execution was|Execution error|"message":' |
+  Select-Object -First 30

@@ -58,6 +58,32 @@ TAVILY = {'query': '여행 기념품 추천', 'results': [
      'published_date': '2026-09-07'},
 ]}
 
+# 실제 응답은 최상위가 JSON 배열이고 청크로 나뉘어 온다 (키 없이 호출해 확인).
+# 그래서 모의 응답도 배열로, 본문은 두 조각으로 쪼개 이어 붙이기 경로를 태운다.
+_ANALYSIS = json.dumps({
+    'summary': '오사카에서 사 온 기념품을 하나씩 꺼내 보여 주는 영상이다. 가격을 화면에 띄운다.',
+    'items': [
+        {'name': '코로로 젤리', 'at': '01:24', 'note': '화면에 "포도맛이 제일 인기" 라고 적혀 있음'},
+        {'name': '오사카 한정 킷캣', 'at': '03:10', 'note': ''},
+    ],
+}, ensure_ascii=False)
+_HALF = len(_ANALYSIS) // 2
+
+GEMINI_OK = [
+    # 사고 단계가 앞에 섞여 온다. model_output 만 골라야 한다.
+    {'steps': [{'type': 'thinking',
+                'content': [{'type': 'text', 'text': '무시되어야 하는 텍스트'}]}]},
+    {'steps': [{'type': 'model_output',
+                'content': [{'type': 'text', 'text': _ANALYSIS[:_HALF]}]}]},
+    {'id': 'v1_mock', 'object': 'interaction', 'status': 'completed',
+     'model': 'gemini-3.5-flash', 'usage': {'total_tokens': 1234},
+     'steps': [{'type': 'model_output',
+                'content': [{'type': 'text', 'text': _ANALYSIS[_HALF:]}]}]},
+]
+
+GEMINI_ERR = [{'error': {'code': 429, 'message': 'Quota exceeded for youtube video seconds',
+                         'status': 'RESOURCE_EXHAUSTED'}}]
+
 FORM_INPUT = {
     'topic': '여행 기념품 추천',
     'period': '최근 7일',
@@ -120,8 +146,19 @@ const cb = fields.find(f => f.fieldType === 'checkbox');
 if (!cb) throw new Error('체크박스 필드가 없습니다.');
 const opts = (cb.fieldOptions.values ?? cb.fieldOptions).map(o => o.option);
 if (opts.length < 2) throw new Error('후보 옵션이 2개 미만입니다: ' + opts.length);
-console.log('[모의] 후보 옵션 ' + opts.length + '개, 앞 2개 선택: ' + opts.slice(0, 2).join(' | '));
-return [{ json: { picks: opts.slice(0, 2) } }];
+
+// 영상 후보 2개를 고른다. 그냥 앞 2개를 고르면 라운드로빈 순서 때문에
+// 유튜브 1 + 웹 1 이 되어 Gemini 호출이 1건뿐이고, 모의 응답의 오류 경로가
+// 안 돈다. 아이디로 골라야 옵션 텍스트 형식에 의존하지 않는다.
+const vidIds = cands.filter(c => /[?&]v=|youtu\.be\//.test(c.url)).map(c => c.id);
+if (vidIds.length < 2) throw new Error('영상 후보가 2개 미만입니다: ' + vidIds.length);
+const picks = vidIds.slice(0, 2).map(id => {
+  const o = opts.find(t => t.endsWith('— ' + id) || t.endsWith('' + id));
+  if (!o) throw new Error('후보 ' + id + ' 에 해당하는 옵션을 못 찾았습니다.');
+  return o;
+});
+console.log('[모의] 후보 옵션 ' + opts.length + '개, 영상 2개 선택: ' + picks.join(' | '));
+return [{ json: { picks } }];
 """
 
 MOCK_QUESTION = r"""
@@ -137,6 +174,20 @@ const radio = fields.find(f => f.fieldName === 'decision');
 if (!radio) throw new Error('진행 여부 radio 필드가 없습니다.');
 const html = fields.find(f => f.fieldType === 'html');
 if (!html || !html.html) throw new Error('스토리보드 미리보기 html 이 없습니다.');
+// 영상 분석이 원문에 실제로 접혔는지. 이게 깨지면 Gemini 응답 파싱이 틀린 것이고,
+// 원문 대조가 화면에서 본 품목을 not_in_source 로 잘못 찍는다.
+const fs = require('fs');
+const runDir = $('선택 정리').first().json.runDir;
+const sf = JSON.parse(fs.readFileSync(runDir + '/sources-fetched.json', 'utf8'));
+if (!(sf.watched ?? []).length) {
+  throw new Error('영상 분석이 하나도 접히지 않았습니다: ' + JSON.stringify(sf.videoErrors));
+}
+if (!(sf.videoErrors ?? []).length) throw new Error('오류 경로를 안 탔습니다 — 모의 응답을 확인하세요.');
+const st = fs.readFileSync(runDir + '/source-text.txt', 'utf8');
+if (!st.includes('영상 분석 (Gemini')) throw new Error('source-text.txt 에 영상 분석이 없습니다.');
+if (!st.includes('코로로 젤리 [01:24]')) throw new Error('영상 분석 품목·시각이 원문에 없습니다.');
+console.log('[모의] 영상 분석 접힘 ' + sf.watched.length + '건 / 오류 ' + sf.videoErrors.length + '건');
+
 console.log('[모의] 스토리보드 미리보기 ' + html.html.length + '자, 승인 제출');
 return [{ json: { decision: '승인', revision: '' } }];
 """
@@ -171,6 +222,23 @@ for name, payload in (('유튜브 검색', YT), ('웹 검색', TAVILY)):
     n['parameters'] = {'jsCode': 'return [{ json: %s }];' % json.dumps(payload, ensure_ascii=False)}
     n.pop('onError', None)
     n.pop('credentials', None)
+
+# 2b. Gemini -> canned response. Stubbed so the mock never posts to Google,
+#     and so the steps[] parsing in 심층조사 지시 is actually exercised.
+g = by_name['제미나이 영상 분석']
+g['type'] = 'n8n-nodes-base.code'
+g['typeVersion'] = 2
+g['parameters'] = {'jsCode': chr(10).join([
+    # HTTP 노드가 responseFormat=text 라 {data: '<원문>'} 로 나온다.
+    'const canned = %s;' % json.dumps(
+        [{'data': json.dumps(x, ensure_ascii=False)} for x in (GEMINI_OK, GEMINI_ERR)],
+        ensure_ascii=False),
+    '// 입력 아이템 수만큼 내보내야 심층조사 지시의 인덱스 짝이 유지된다.',
+    'return $input.all().map((_, i) => ({ json: canned[i %  canned.length] }));'.replace('%  ', '% '),
+])}
+g.pop('onError', None)
+g.pop('retryOnFail', None)
+g.pop('credentials', None)
 
 # 3. form pages -> validator + canned submission
 for name, js in (('후보 선택', MOCK_PICK), ('질문', MOCK_QUESTION), ('스토리보드 승인', MOCK_APPROVE)):

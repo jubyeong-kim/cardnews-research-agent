@@ -8,9 +8,9 @@
 
 ---
 
-## 1. 처음 한 번만: API 키 두 개 발급
+## 1. 처음 한 번만: API 키 세 개 발급
 
-둘 다 무료이고 결제 카드 등록이 필요 없습니다.
+셋 다 무료이고 결제 카드 등록이 필요 없습니다.
 
 ### YouTube Data API v3 — 영상 후보
 
@@ -30,6 +30,26 @@
 
 무료 **월 1,000 크레딧**, 이 워크플로는 한 건에 1크레딧입니다.
 
+### Google AI Studio — 유튜브 영상 분석
+
+유튜브 설명란은 쇼츠와 상당수 브이로그에서 비어 있습니다. 그러면 아무리 좋은
+영상이어도 거기서 나온 품목이 전부 "미확인"으로 떨어집니다. Gemini 에게 영상
+URL 을 그대로 넘기면 화면과 말을 직접 읽고, 품목이 나오는 **시각(mm:ss)** 까지
+돌려줍니다.
+
+1. [aistudio.google.com/apikey](https://aistudio.google.com/apikey) 로그인
+2. **Create API key** → 1단계에서 만든 `cardnews` 프로젝트를 골라도 됩니다
+3. `AIza...` 복사
+
+YouTube 키와 **같은 구글 계정이어도 별개의 키**입니다. 결제 등록은 필요 없습니다.
+
+무료 한도: 하루 **유튜브 영상 8시간**, 요청당 **영상 1개**, **공개 영상만**
+(비공개·미등록 영상은 안 됩니다). 워크플로는 고른 후보 중 유튜브 영상을 최대
+3편까지, 40분 넘는 영상은 건너뜁니다. 건너뛴 영상도 설명란은 그대로 쓰입니다.
+
+> 이 키를 안 넣어도 워크플로는 돕니다. 영상 분석만 빠지고 지금까지의 동작으로
+> 돌아갑니다.
+
 ### 키가 맞는지 먼저 확인 (선택)
 
 `여기에_키`만 바꿔서 터미널에서 실행합니다. `items` / `results` 배열이 오면 정상입니다.
@@ -43,7 +63,14 @@ curl -s "https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&ma
 curl -s -X POST https://api.tavily.com/search -H "Authorization: Bearer 여기에_키" -H "Content-Type: application/json" -d "{\"query\":\"여행 기념품 추천\",\"language\":\"ko\",\"max_results\":2}"
 ```
 
-두 키 모두 **n8n Credentials에만** 넣습니다. 워크플로 JSON에는 들어가지 않습니다.
+```bash
+curl -s -X POST https://generativelanguage.googleapis.com/v1beta/interactions -H "x-goog-api-key: 여기에_키" -H "Api-Revision: 2026-05-20" -H "Content-Type: application/json" -d "{\"model\":\"gemini-3.5-flash\",\"input\":\"ping\"}"
+```
+
+Gemini 응답은 `[{...}]` 처럼 **배열**로 옵니다. 정상입니다.
+`"API key not valid"` 면 키가 틀린 것, `404` 면 경로가 틀린 것입니다.
+
+세 키 모두 **n8n Credentials에만** 넣습니다. 워크플로 JSON에는 들어가지 않습니다.
 
 ## 2. Claude CLI 로그인 확인
 
@@ -92,9 +119,36 @@ n8n 화면 우상단 **⋯ → Import from File** 로 `workflows/cardnews-mvp.js
 - `유튜브 검색` 노드 → Credential 종류 **Query Auth** → Name `key`, Value = YouTube API 키
 - `웹 검색` 노드 → Credential 종류 **Header Auth** → Name `Authorization`, Value `Bearer tvly-...`
   ← `Bearer` 뒤에 **한 칸 띄우고** 키를 붙입니다. 이걸 빠뜨리면 401이 납니다.
+  Credential 이름을 `Tavily` 로 지어 두세요. 아래 Gemini 것과 종류가 같습니다.
+- `제미나이 영상 분석` 노드 → Credential 종류 **Header Auth** → Name `x-goog-api-key`,
+  Value = AI Studio 키 (`Bearer` 없이 키만). 이름은 `Gemini` 로.
+
+Header Auth credential 이 **두 개**가 됩니다. 노드마다 어느 쪽인지 직접 골라
+주세요. `웹 원문`(Tavily)·`제품컷 검색`(Tavily)·`제미나이 영상 분석`(Gemini)
+세 곳입니다. 잘못 고르면 Tavily 키가 구글로 전송됩니다.
 
 좌측 메뉴 **Credentials → Add credential** 에서 미리 만들어두거나, 노드를 열어
 **Credential to connect with → Create new** 로 즉석에서 만들어도 됩니다.
+
+### 워크플로를 고친 뒤 반영하기 — `deploy.ps1`
+
+`workflows/cardnews-mvp.json` 은 **credential 이 없는 템플릿**입니다 (일부러
+그렇습니다 — 키가 저장소에 들어가면 안 됩니다). 그래서 이 파일을 그냥 Import
+하면 **연결해 둔 키가 전부 날아갑니다.**
+
+고친 내용을 반영할 때는 이것만 실행하세요.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy.ps1
+```
+
+빌드 → DB 사본 내보내기 → credential 이어붙이기 → 가져오기 → 활성화 → 재기동 →
+폼이 응답할 때까지 기다렸다가 알려줍니다.
+
+**새로 생긴 노드는 credential 을 물려받지 못할 수 있습니다.** 같은 인증 방식의
+credential 이 여럿이면 `deploy.ps1` 이 추측하지 않고 노드 이름을 찍어 경고합니다.
+Tavily 와 Gemini 가 둘 다 Header Auth 라 이 경우에 해당합니다. 경고가 나오면
+n8n UI 에서 그 노드에 직접 골라 주고 다시 실행하세요.
 
 ## 5. 사용하기
 

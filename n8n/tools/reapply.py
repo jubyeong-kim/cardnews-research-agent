@@ -21,22 +21,31 @@ if not creds:
 
 # Also index by generic auth type, so a NEW http node picks up the right
 # credential without the user having to wire it in the UI again.
+#
+# Only when the answer is unambiguous. Tavily and Gemini are BOTH Header Auth,
+# so guessing here would have posted the Tavily key to generativelanguage.
+# googleapis.com -- a wrong key leaking to a third party, not just a 401.
 by_auth = {}
 for n in db['nodes']:
-    c = n.get('creden' 'tials')
-    if c:
-        by_auth.update({k: v for k, v in c.items()})
+    for k, v in (n.get('creden' 'tials') or {}).items():
+        by_auth.setdefault(k, {})[v.get('id') or v.get('name')] = v
 
-carried, inferred = [], []
+carried, inferred, ambiguous = [], [], []
 for n in tpl['nodes']:
     if n['name'] in creds:
         n['credentials'] = creds[n['name']]
         carried.append(n['name'])
         continue
     auth = n.get('parameters', {}).get('genericAuthType')
-    if auth and auth in by_auth:
-        n['credentials'] = {auth: by_auth[auth]}
+    if not auth:
+        continue
+    opts = by_auth.get(auth, {})
+    if len(opts) == 1:
+        n['credentials'] = {auth: list(opts.values())[0]}
         inferred.append('%s(%s)' % (n['name'], auth))
+    elif len(opts) > 1:
+        ambiguous.append('%s(%s: %s)' % (
+            n['name'], auth, ', '.join(sorted(v.get('name', '?') for v in opts.values()))))
 
 tpl['id'] = db.get('id', 'cardnewsMvp0001')
 tpl['active'] = db.get('active', False)
@@ -45,4 +54,11 @@ json.dump(tpl, io.open(out_path, 'w', encoding='utf-8'), ensure_ascii=False, ind
 print('credential 이어붙임: %s' % ', '.join(carried))
 if inferred:
     print('인증방식으로 추론: %s' % ', '.join(inferred))
+if ambiguous:
+    # 틀린 키를 붙이느니 비워 두는 편이 낫다. 엉뚱한 서비스로 키가 나간다.
+    print('')
+    print('[!] 같은 인증방식 credential 이 여럿이라 추측하지 않았습니다.')
+    for a in ambiguous:
+        print('    %s' % a)
+    print('    n8n UI 에서 해당 노드에 직접 골라 주세요.')
 print('->', out_path)

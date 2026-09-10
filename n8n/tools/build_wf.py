@@ -315,6 +315,97 @@ const webUrls = [...new Set(withVid.filter(c => !c.videoId).map(c => c.url))];
 return [{ json: { ...prev, chosen: withVid, videoIds: videoIds.join(','), webUrls } }];
 """.strip()
 
+JS_VIDEO = r"""
+// Gemini 가 고른 영상을 직접 본다.
+//
+// snippet.description 은 쇼츠와 상당수 브이로그에서 비어 있다. 영상이 아무리
+// 좋아도 거기서 나온 품목은 전부 미확인으로 떨어졌다. 설명 대신 화면과 말을
+// 읽게 하고, 품목이 나오는 시각까지 받아 온다.
+//
+// 무료 한도는 요청당 영상 1개다. 그래서 영상 하나에 아이템 하나를 내보내고
+// HTTP 노드가 각각 한 번씩 호출하게 둔다.
+const prev = $('선택 정리').first().json;
+
+const meta = new Map();
+try {
+  for (const it of ($('유튜브 원문').first().json.items ?? [])) meta.set(it.id, it);
+} catch (e) { /* 노드가 실패했으면 길이를 모른 채 진행한다 */ }
+
+// PT1H2M3S -> 초
+const durSec = s => {
+  const m = String(s ?? '').match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
+  return m ? (+(m[1] || 0)) * 3600 + (+(m[2] || 0)) * 60 + (+(m[3] || 0)) : null;
+};
+
+// 40분 초과는 건너뛴다. 무료 한도가 하루 8시간인데 유튜브 URL 은 구간을 잘라
+// 보낼 수 없다. 건너뛰어도 설명 전문은 그대로 쓰이므로 지금 동작으로 돌아갈 뿐이다.
+const MAX_SEC = 40 * 60;
+const MAX_VIDEOS = 3;   // 후보 선택 상한과 같다
+const MODEL = 'gemini-3.5-flash';
+
+const targets = [];
+const skipped = [];
+for (const c of prev.chosen) {
+  if (!c.videoId) continue;
+  const sec = durSec((meta.get(c.videoId) ?? {}).contentDetails?.duration);
+  if (sec !== null && sec > MAX_SEC) { skipped.push(c.title + ' (' + Math.round(sec / 60) + '분, 너무 김)'); continue; }
+  if (targets.length >= MAX_VIDEOS) { skipped.push(c.title + ' (편당 상한 초과)'); continue; }
+  targets.push({ cid: c.id, videoId: c.videoId, title: c.title });
+}
+
+const SCHEMA = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string' },
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { name: { type: 'string' }, at: { type: 'string' }, note: { type: 'string' } },
+        required: ['name', 'at', 'note'],
+      },
+    },
+  },
+  required: ['summary', 'items'],
+};
+
+const ASK = [
+  '이 영상에서 소개하는 실물 기념품·선물 품목을 뽑아라.',
+  '카드뉴스 주제: ' + prev.topic,
+  '',
+  '규칙:',
+  '- 화면에 글자로 보이거나 말로 언급된 이름만 적는다. 정식 제품명을 추측해',
+  '  괄호로 덧붙이지 마라. 확인되지 않은 제품 동일시는 지어내기와 같다.',
+  '- name 은 영상에 나온 표기 그대로.',
+  '- at 은 그 품목이 처음 나오는 시각을 mm:ss 로.',
+  '- note 는 영상에서 실제로 한 말이나 화면에 적힌 내용 한 줄. 없으면 빈 문자열.',
+  '- 사 가는 물건이 아닌 것(식당에서 먹은 음식, 교통, 숙소)은 빼라.',
+  '- 품목이 없으면 items 를 빈 배열로 둔다. 억지로 채우지 마라.',
+  '- summary 는 이 영상이 무엇을 다루는지 두 문장.',
+].join('\n');
+
+// n8n 은 아이템을 못 받은 노드를 건너뛴다. 그러면 체인이 멈춘다.
+// 텍스트만 있는 요청 한 번으로 대신한다 — 영상 없음, 한도 소모 없음.
+// ponytail: 빈 호출 1건. 분기가 필요해지면 IF 노드로 교체
+if (!targets.length) {
+  return [{ json: { skip: true, cid: null, title: '', skipped, body: { model: MODEL, input: 'ok' } } }];
+}
+
+return targets.map(t => ({
+  json: {
+    skip: false, cid: t.cid, videoId: t.videoId, title: t.title, skipped,
+    body: {
+      model: MODEL,
+      input: [
+        { type: 'text', text: ASK },
+        { type: 'video', uri: 'https://www.youtube.com/watch?v=' + t.videoId },
+      ],
+      response_format: { type: 'text', mime_type: 'application/json', schema: SCHEMA },
+    },
+  },
+}));
+""".strip()
+
 JS_DEEP = r"""
 const fs = require('fs');
 const prev = $('선택 정리').first().json;
@@ -345,6 +436,50 @@ try {
   extractFailed = (j.failed_results ?? []).map(f => f.url ?? String(f));
 } catch (e) { /* node errored; handled as 미확인 below */ }
 
+// Gemini 가 읽어 온 영상 내용. 후보 id 로 찾는다. 영상 분석 대상이 영상마다
+// 아이템 하나를 내보내고 제미나이 영상 분석이 순서대로 답하므로 인덱스가 맞는다.
+// interactions 응답에서 모델이 쓴 텍스트만 뽑는다.
+//
+// 최상위가 배열이다. generateContent 는 객체 하나를 주지만 이쪽은 청크를 JSON
+// 배열로 흘려 준다 (Transfer-Encoding: chunked). 키 없이 호출해 확인했고,
+// 오류도 [{"error":{...}}] 로 왔다. 객체 하나로 오는 경우도 받아 둔다.
+const pickText = raw => {
+  let payload;
+  try { payload = JSON.parse(raw); }
+  catch (e) { return { err: '응답이 JSON 이 아님: ' + String(raw).slice(0, 200) }; }
+  const objs = Array.isArray(payload) ? payload : [payload];
+  const bad = objs.find(o => o && o.error);
+  if (bad) return { err: String(bad.error.message ?? JSON.stringify(bad.error)).slice(0, 200) };
+  // output_text 는 같은 내용의 SDK 쪽 이름이고 응답에 붙어 오는 경우가 있다.
+  const withText = objs.filter(o => o && o.output_text);
+  if (withText.length) return { txt: String(withText[withText.length - 1].output_text) };
+  // steps[] 에는 사고·도구 단계도 섞여 있다. model_output 만 이어 붙인다.
+  // 스트리밍이면 조각으로 나뉘어 오므로 마지막 하나만 쓰면 잘린다.
+  const txt = objs
+    .flatMap(o => (o && Array.isArray(o.steps)) ? o.steps : [])
+    .filter(st => st && st.type === 'model_output')
+    .flatMap(st => (st.content ?? []).filter(c => c && c.type === 'text').map(c => c.text))
+    .join('');
+  return txt.trim() ? { txt } : { err: '빈 응답' };
+};
+
+const watched = new Map();
+const videoErrors = [];
+let skippedVideos = [];
+try {
+  const asked = $('영상 분석 대상').all().map(i => i.json);
+  skippedVideos = asked[0]?.skipped ?? [];
+  const got = $('제미나이 영상 분석').all().map(i => i.json);
+  asked.forEach((a, idx) => {
+    if (a.skip || !a.cid) return;
+    const got1 = pickText(String((got[idx] ?? {}).data ?? ''));
+    if (got1.err) { videoErrors.push(a.title + ': ' + got1.err); return; }
+    let parsed = null;
+    try { parsed = JSON.parse(got1.txt); } catch (e) { /* 스키마를 안 지켰으면 원문 그대로 */ }
+    watched.set(a.cid, parsed ?? { summary: got1.txt, items: [] });
+  });
+} catch (e) { videoErrors.push('영상 분석 노드 미실행: ' + String(e.message ?? e).slice(0, 120)); }
+
 const blocks = [];
 let verified = 0;
 for (const c of chosen) {
@@ -360,17 +495,34 @@ for (const c of chosen) {
   } else if (pages.has(c.url)) {
     body = pages.get(c.url);
   }
+  // 길이 제한은 여기서 건다. 영상 분석을 붙인 뒤에 자르면 설명 전문이 긴
+  // 영상에서 분석이 통째로 날아간다 — 제일 값진 재료가 제일 먼저 잘린다.
+  body = cut(body, 8000);
+  // 영상 분석을 같은 블록에 접어 넣는다. 그래야 source-text.txt 에도 들어간다 —
+  // 원문 대조가 그 파일로 품목명을 확인하므로, 빼면 Gemini 가 화면에서 본 품목이
+  // not_in_source 로 잘못 찍힌다.
+  const w = watched.get(c.id);
+  if (w) {
+    const seen = ['영상 분석 (Gemini 가 영상을 직접 보고 정리한 것):'];
+    if (w.summary) seen.push(String(w.summary));
+    for (const it of (w.items ?? [])) {
+      seen.push('- ' + it.name + ' [' + (it.at || '시각 미상') + ']' + (it.note ? ' — ' + it.note : ''));
+    }
+    body = [body, seen.join('\n')].filter(s => String(s).trim()).join('\n\n');
+  }
+
   if (body.trim()) verified++;
   blocks.push([
     '### ' + c.id + ' ' + c.title,
     'URL: ' + c.url,
     body.trim() ? '원문 본문(실제로 가져온 것):' : '원문 본문: 가져오지 못했습니다. 이 후보는 미확인으로 다룬다.',
-    body.trim() ? cut(body, 8000) : '',
+    body.trim() ? body : '',
   ].filter(Boolean).join('\n'));
 }
 
 fs.writeFileSync(prev.runDir + '/sources-fetched.json', JSON.stringify({
   verified, total: chosen.length, extractFailed,
+  watched: [...watched.keys()], videoSkipped: skippedVideos, videoErrors,
   blocks: blocks.map(b => b.length),
 }, null, 2), 'utf8');
 
@@ -388,6 +540,7 @@ const prompt = [
   '',
   '아래에 각 후보의 원문 본문을 실제로 가져와 붙였다 (' + verified + '/' + chosen.length + '건 확보).',
   '유튜브는 videos.list의 설명 전문, 웹은 Tavily로 추출한 페이지 본문이다.',
+  watched.size ? '영상 ' + watched.size + '건에는 Gemini 가 영상을 직접 보고 정리한 "영상 분석"이 붙어 있다. 이것도 원문으로 취급한다.' : '',
   '',
   blocks.join('\n\n'),
   '',
@@ -431,6 +584,7 @@ const prompt = [
   '- 카드는 5~8장. 표지는 관심을 끌고, 본문 카드는 하나의 핵심만, 마지막 카드는 요약 또는 다음 행동.',
   '- 근거 없는 순위·수치·과장 금지. 확인하지 못한 숫자는 아예 쓰지 마라.',
   '- 후킹 문구는 확인된 사실 범위 안에서만 쓴다.',
+  '- 영상 분석에서 가져온 내용은 source 에 URL 과 함께 시각(mm:ss)을 적어라.',
   '- source 는 셋 중 하나다. 확인한 URL / 재료를 못 가져와 확인 못 했으면 "미확인" /',
   '  표지나 마무리처럼 새로운 사실을 주장하지 않는 카드는 "해당 없음". 주장이 없는 카드를',
   '  "미확인"으로 적지 마라 — 검증 실패로 읽힌다.',
@@ -635,6 +789,21 @@ const html = '<p><b>독자</b> ' + he(sb.audience) + '<br><b>앵글</b> ' + he(s
                 '<a href="' + he(pg.url) + '" target="_blank">' + he(pg.host) + '</a>').join(' · ') : '')
             + '</p>').join('')
       : '')
+  + (() => {
+      // 영상 분석 결과 한 줄. 키가 틀렸거나 한도를 넘겼으면 여기서 바로 보인다.
+      let sf = null;
+      try { sf = JSON.parse(fs.readFileSync(runDir + '/sources-fetched.json', 'utf8')); } catch (e) { }
+      if (!sf) return '';
+      const ok = (sf.watched ?? []).length;
+      const errs = sf.videoErrors ?? [];
+      const skips = sf.videoSkipped ?? [];
+      if (!ok && !errs.length && !skips.length) return '';
+      return '<p><b>영상 분석</b> — Gemini 가 영상을 직접 본 결과</p><ul>'
+        + '<li>반영 ' + ok + '편</li>'
+        + errs.map(e => '<li>실패: ' + he(e) + '</li>').join('')
+        + skips.map(e => '<li>건너뜀: ' + he(e) + '</li>').join('')
+        + '</ul>';
+    })()
   + (itemChecks.length
       ? '<p><b>원문 대조</b> — 품목명이 우리가 가져온 원문에 실제로 있는지</p><ul>'
         + itemChecks.map(v => '<li>' + he(v.name) + ' — '
@@ -907,7 +1076,9 @@ nodes = [
         'authentication': 'genericCredentialType', 'genericAuthType': 'httpQueryAuth',
         'sendQuery': True,
         'queryParameters': {'parameters': [
-            {'name': 'part', 'value': 'snippet,statistics'},
+            # contentDetails 는 길이 때문에 필요하다. 영상 분석 대상이 너무 긴 영상을
+            # 걸러 낼 때 쓴다.
+            {'name': 'part', 'value': 'snippet,statistics,contentDetails'},
             {'name': 'id', 'value': '={{ $json.videoIds }}'},
         ]},
         'options': {},
@@ -924,6 +1095,36 @@ nodes = [
         'options': {},
     }, [1960, -110], {'onError': 'continueRegularOutput',
                       'retryOnFail': True, 'maxTries': 3, 'waitBetweenTries': 2000}),
+
+    code('영상 분석 대상', JS_VIDEO, [1740, 90]),
+
+    # 유튜브 URL 을 그대로 넘기면 Gemini 가 영상을 직접 본다. 무료 한도는
+    # 하루 8시간, 요청당 영상 1개, 공개 영상만.
+    node('제미나이 영상 분석', 'n8n-nodes-base.httpRequest', 4.5, {
+        'method': 'POST',
+        'url': 'https://generativelanguage.googleapis.com/v1beta/interactions',
+        'authentication': 'genericCredentialType', 'genericAuthType': 'httpHeaderAuth',
+        'sendHeaders': True,
+        'headerParameters': {'parameters': [
+            # 리비전을 못 박는다. 이 API 는 2026-05 에 출력이 steps[] 로 옮겨
+            # 가는 파괴적 변경이 있었다. 안 박으면 이미 배포된 워크플로 밑에서
+            # 응답 모양이 또 바뀔 수 있다.
+            {'name': 'Api-Revision', 'value': '2026-05-20'},
+        ]},
+        'sendBody': True, 'specifyBody': 'json',
+        'jsonBody': '={{ JSON.stringify($json.body) }}',
+        'options': {
+            # 영상 한 편에 1분 넘게 걸리기도 한다.
+            'timeout': 300000,
+            # 텍스트로 받아 직접 파싱한다. 이 엔드포인트는 generateContent 와
+            # 달리 최상위가 JSON 배열이다(chunked 스트리밍). 키 없이 호출해
+            # 확인했다: 오류도 [{...}] 로 온다. n8n 은 최상위 배열을 아이템
+            # 여러 개로 쪼개므로, 그대로 두면 영상 분석 대상과의 인덱스 짝이
+            # 깨진다. 텍스트면 호출당 정확히 아이템 1개다.
+            'response': {'response': {'responseFormat': 'text'}},
+        },
+    }, [1960, 90], {'onError': 'continueRegularOutput',
+                    'retryOnFail': True, 'maxTries': 2, 'waitBetweenTries': 5000}),
 
     code('심층조사 지시', JS_DEEP, [2180, -110]),
     node('Claude: 심층조사', 'n8n-nodes-base.executeCommand', 1, {'command': cmd(session=True)}, [2400, -110]),
@@ -990,7 +1191,9 @@ connections = {
     '후보 선택': {'main': [m('선택 정리')]},
     '선택 정리': {'main': [m('유튜브 원문')]},
     '유튜브 원문': {'main': [m('웹 원문')]},
-    '웹 원문': {'main': [m('심층조사 지시')]},
+    '웹 원문': {'main': [m('영상 분석 대상')]},
+    '영상 분석 대상': {'main': [m('제미나이 영상 분석')]},
+    '제미나이 영상 분석': {'main': [m('심층조사 지시')]},
     '심층조사 지시': {'main': [m('Claude: 심층조사')]},
     'Claude: 심층조사': {'main': [m('응답 파싱')]},
     '응답 파싱': {'main': [m('질문인가?')]},
