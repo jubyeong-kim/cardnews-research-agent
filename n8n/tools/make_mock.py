@@ -58,8 +58,10 @@ TAVILY = {'query': '여행 기념품 추천', 'results': [
      'published_date': '2026-09-07'},
 ]}
 
-# 실제 응답은 최상위가 JSON 배열이고 청크로 나뉘어 온다 (키 없이 호출해 확인).
-# 그래서 모의 응답도 배열로, 본문은 두 조각으로 쪼개 이어 붙이기 경로를 태운다.
+# 실측(runs/_probe): 성공은 객체 하나로 오고 청크가 나뉘지 않았다. 오류는
+# 배열 [{"error":...}] 로 왔다. 파서는 두 모양을 다 받게 해 뒀으므로 모의도
+# 둘 다 태운다 — 성공은 객체 + 두 조각, 오류는 배열. 조각 나누기는 실측에서
+# 안 나왔지만 스트리밍으로 바뀔 여지가 있어 경로를 살려 둔다.
 _ANALYSIS = json.dumps({
     'summary': '오사카에서 사 온 기념품을 하나씩 꺼내 보여 주는 영상이다. 가격을 화면에 띄운다.',
     'items': [
@@ -69,17 +71,18 @@ _ANALYSIS = json.dumps({
 }, ensure_ascii=False)
 _HALF = len(_ANALYSIS) // 2
 
-GEMINI_OK = [
-    # 사고 단계가 앞에 섞여 온다. model_output 만 골라야 한다.
-    {'steps': [{'type': 'thinking',
-                'content': [{'type': 'text', 'text': '무시되어야 하는 텍스트'}]}]},
-    {'steps': [{'type': 'model_output',
-                'content': [{'type': 'text', 'text': _ANALYSIS[:_HALF]}]}]},
-    {'id': 'v1_mock', 'object': 'interaction', 'status': 'completed',
-     'model': 'gemini-3.5-flash', 'usage': {'total_tokens': 1234},
-     'steps': [{'type': 'model_output',
-                'content': [{'type': 'text', 'text': _ANALYSIS[_HALF:]}]}]},
-]
+GEMINI_OK = {
+    'id': 'v1_mock', 'object': 'interaction', 'status': 'completed',
+    'model': 'gemini-3.5-flash', 'service_tier': 'standard',
+    'usage': {'total_tokens': 107139},
+    'steps': [
+        # 실측에서 사고 단계가 앞에 왔고 content 가 비어 있었다. model_output
+        # 만 골라야 한다.
+        {'type': 'thought', 'content': []},
+        {'type': 'model_output', 'content': [{'type': 'text', 'text': _ANALYSIS[:_HALF]}]},
+        {'type': 'model_output', 'content': [{'type': 'text', 'text': _ANALYSIS[_HALF:]}]},
+    ],
+}
 
 GEMINI_ERR = [{'error': {'code': 429, 'message': 'Quota exceeded for youtube video seconds',
                          'status': 'RESOURCE_EXHAUSTED'}}]
