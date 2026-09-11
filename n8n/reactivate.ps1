@@ -15,7 +15,9 @@
 param(
   [string]$WorkflowId = 'cardnewsMvp0001',
   [string]$Import = '',
-  [int]$TimeoutSec = 300
+  # 콜드 부팅은 300초를 넘긴다 (2026-09-11 실측: 밤새 꺼져 있다 켜니
+  # 5분이 지나서야 에디터가 떴다). 짧게 잡으면 정상 부팅을 실패로 보고한다.
+  [int]$TimeoutSec = 600
 )
 
 $ErrorActionPreference = 'Stop'
