@@ -658,7 +658,44 @@ fs.writeFileSync(promptFile, prompt, 'utf8');
 return [{ json: { ...ctx, promptFile } }];
 """.strip()
 
-JS_SOURCECHECK = r"""
+# 판정 규칙만 떼어 둔다. 아래 빌드 시점 검사가 워크플로와 "정확히 같은 코드"
+# 를 돌리게 하려는 것이다. 복사본을 두면 둘이 조용히 어긋난다.
+JS_VERDICT = r"""
+// 띄어쓰기와 문장부호를 지우고 비교한다. 출처마다 멜라노cc, 멜라노CC,
+// 멜라노 CC 로 제각각 쓴다.
+const norm = s => String(s ?? '').toLowerCase().replace(/[\s··・,.()（）\[\]{}"'`~!?\/\\|:;_+=-]+/g, '');
+const tokensOf = s => String(s ?? '')
+  .split(/[\s··・,.()（）\[\]{}"'`~!?\/\\|:;_+=-]+/)
+  .map(norm).filter(t => t.length >= 2);
+
+function verdictOf(name, sourceText) {
+  const hay = norm(sourceText);
+  const full = norm(name);
+  // "VC100 마스크팩 (퀄리티퍼스트 …)" — 괄호 앞이 주장이고, 괄호 안은 모델이
+  // 정식 제품명을 추측해 붙인 것인 경우가 많다.
+  const headRaw = String(name ?? '').split(/[(（]/)[0];
+  const head = norm(headRaw);
+
+  if (!full) return 'empty';
+  if (!hay) return 'no_source';
+  if (hay.includes(full)) return 'in_source';
+  if (head && head !== full && hay.includes(head)) return 'head_only';
+
+  // 통짜로는 없지만 단어가 전부 원문에 있는 경우. 실행 46 에서
+  // "다이마루 백화점 명품 손수건" 이 여기 해당했다 — 설명란에 "다이마루
+  // 백화점" 과 "명품 손수건" 이 따로 있었는데 그 사이에 다른 말이 끼어
+  // 통짜 찾기가 실패했다. 내용은 원문에 다 있는데 잡음만 냈다.
+  //
+  // in_source 와 합치지 않는다. 흔한 단어만으로 지어낸 이름도 이 검사는
+  // 통과하므로, 더 약한 판정으로 따로 표시해 사람이 보게 둔다.
+  const parts = tokensOf(headRaw);
+  if (parts.length >= 2 && parts.every(p => hay.includes(p))) return 'parts_in_source';
+
+  return 'not_in_source';
+}
+""".strip()
+
+JS_SOURCECHECK = (r"""
 const fs = require('fs');
 const sb = $json.storyboard ?? {};
 const items = sb.items ?? [];
@@ -675,36 +712,27 @@ const runDir = $('선택 정리').first().json.runDir;
 // So ask the question we can actually answer. Every invention we have caught
 // -- the matcha-jp cards, the guessed "(케아나나데시코 모공 쌀팩)" -- was a
 // name that was not in the source text. This catches those, for products as
-// well as places, with no API and no possible false positive.
+// well as places, with no API. in_source cannot false-positive; the weaker
+// parts_in_source can, which is why it is reported as its own verdict.
 // Its limit is equally clear: it cannot tell whether the SOURCE is wrong.
 // That axis belongs to the evidence grades.
 let sourceText = '';
 try { sourceText = fs.readFileSync(runDir + '/source-text.txt', 'utf8'); } catch (e) { }
-
-// Compare with spacing and punctuation removed: sources write 멜라노cc,
-// 멜라노CC, 멜라노 CC for the same thing.
-const norm = s => String(s ?? '').toLowerCase().replace(/[\s··・,.()（）\[\]{}"'`~!?\/\\|:;_+=-]+/g, '');
-const hay = norm(sourceText);
-
+""" + JS_VERDICT + r"""
 const itemChecks = items.map(i => {
   const name = String(i.name ?? '').trim();
-  const full = norm(name);
-  // "VC100 마스크팩 (퀄리티퍼스트 …)" — the head is the claim, the bracket is
-  // often the model's own guess at a formal product name.
-  const head = norm(name.split(/[(（]/)[0]);
-  let verdict;
-  if (!full) verdict = 'empty';
-  else if (!hay) verdict = 'no_source';
-  else if (hay.includes(full)) verdict = 'in_source';
-  else if (head && head !== full && hay.includes(head)) verdict = 'head_only';
-  else verdict = 'not_in_source';
-  return { name, itemType: i.itemType ?? '', evidence: i.evidence ?? '', verdict };
+  return {
+    name,
+    itemType: i.itemType ?? '',
+    evidence: i.evidence ?? '',
+    verdict: verdictOf(name, sourceText),
+  };
 });
 
 fs.writeFileSync(runDir + '/items-checked.json', JSON.stringify(itemChecks, null, 2), 'utf8');
 
 return [{ json: { ...$json, itemChecks } }];
-""".strip()
+""").strip()
 
 JS_SHOTS = r"""
 const sb = $json.storyboard ?? {};
@@ -717,7 +745,7 @@ const usable = items.filter(i => {
   const ev = String(i.evidence ?? '');
   const vd = byName.get(String(i.name ?? '').trim());
   return ['official', 'confirmed', 'weak'].includes(ev)
-    && ['in_source', 'head_only'].includes(vd);
+    && ['in_source', 'head_only', 'parts_in_source'].includes(vd);
 });
 
 // Same reason as elsewhere: n8n skips a node that gets no items, which would
@@ -821,6 +849,7 @@ const html = '<p><b>독자</b> ' + he(sb.audience) + '<br><b>앵글</b> ' + he(s
         + itemChecks.map(v => '<li>' + he(v.name) + ' — '
             + (v.verdict === 'in_source'     ? '원문에 있음'
              : v.verdict === 'head_only'     ? '<b>괄호 앞만 원문에 있음 — 괄호 안은 모델 추측일 수 있음</b>'
+             : v.verdict === 'parts_in_source' ? '단어는 전부 원문에 있으나 이 이름 그대로는 없음 — 모델이 조합한 이름'
              : v.verdict === 'not_in_source' ? '<b>원문에 없음 — 카드에 쓰지 마세요</b>'
              : v.verdict === 'no_source'     ? '원문을 못 가져와 대조 불가'
              : '이름 없음')
@@ -951,6 +980,7 @@ const sources = [
     ? itemChecks.map(v => '- ' + v.name + ' — ' + (
         v.verdict === 'in_source'     ? '원문에 있음'
       : v.verdict === 'head_only'     ? '괄호 앞만 원문에 있음 (괄호 안은 모델 추측 가능성)'
+      : v.verdict === 'parts_in_source' ? '단어는 전부 원문에 있으나 이 이름 그대로는 없음 (모델이 조합)'
       : v.verdict === 'not_in_source' ? '원문에 없음'
       : v.verdict === 'no_source'     ? '원문을 못 가져와 대조 불가'
       : '이름 없음'))
@@ -1239,6 +1269,47 @@ for src, spec in connections.items():
     for branch in spec['main']:
         for link in branch:
             assert link['node'] in names, 'unknown target node: %s' % link['node']
+
+# Run the verdict rule against fixtures, using the SAME snippet the workflow
+# embeds. 실행 46 에서 조합된 이름이 not_in_source 로 찍혀 잡음이 됐다.
+# 판정이 조용히 느슨해지거나 빡빡해지면 화면의 경고가 믿을 수 없게 된다.
+import subprocess, tempfile, os as _os
+
+VERDICT_CASES = [
+    # (이름, 원문, 기대 판정)
+    ('고베 푸딩', '고베 푸딩은 효고현의 대표 기념품이다', 'in_source'),
+    ('멜라노CC', '멜라노 cc 앰플을 샀다', 'in_source'),            # 띄어쓰기·대소문자 무시
+    ('VC100 마스크팩 (퀄리티퍼스트 초이스)', 'VC100 마스크팩을 대량으로 샀다', 'head_only'),
+    # 실행 46 의 그 항목. 설명란에 두 조각이 따로 있고 사이에 다른 말이 낀다.
+    ('다이마루 백화점 명품 손수건 (BOSS·DAKS)',
+     '오사카 다이마루 백화점 1층 잡화. 남성은 BOSS·DAKS 명품 손수건 추천', 'parts_in_source'),
+    # 단어 하나라도 없으면 조합으로 봐주지 않는다.
+    ('오사카 한정 킷캣', '오사카 다이마루 백화점 손수건을 샀다', 'not_in_source'),
+    ('흐린날 젤리스틱', '고베 푸딩과 오사카 치즈 브륄레를 샀다', 'not_in_source'),
+    ('고베 푸딩', '', 'no_source'),
+    ('', '아무 원문이나', 'empty'),
+]
+
+_test_js = (JS_VERDICT + '\nconst CASES = ' + json.dumps(VERDICT_CASES, ensure_ascii=False) + ';\n' + r"""
+let bad = 0;
+for (const [name, source, want] of CASES) {
+  const got = verdictOf(name, source);
+  if (got !== want) {
+    bad++;
+    console.error('판정 불일치: "' + name + '" -> ' + got + ' (기대: ' + want + ')');
+  }
+}
+if (bad) { console.error(bad + '건 불일치'); process.exit(1); }
+""")
+_fh = tempfile.NamedTemporaryFile('w', suffix='.js', delete=False, encoding='utf-8')
+_fh.write(_test_js)
+_fh.close()
+_r = subprocess.run(['node', _fh.name], capture_output=True, text=True, encoding='utf-8')
+_os.unlink(_fh.name)
+if _r.returncode != 0:
+    print(_r.stderr or _r.stdout)
+    raise SystemExit('원문 대조 판정 검사 실패 — 쓰지 않았습니다.')
+print('원문 대조 판정 검사 %d건 통과' % len(VERDICT_CASES))
 
 # Syntax-check every Code node before writing. A broken jsCode otherwise only
 # surfaces three minutes into a live run as "Unexpected string".
