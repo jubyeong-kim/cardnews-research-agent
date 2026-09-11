@@ -71,6 +71,20 @@ _ANALYSIS = json.dumps({
 }, ensure_ascii=False)
 _HALF = len(_ANALYSIS) // 2
 
+VIEWS = {'kind': 'youtube#videoListResponse', 'items': [
+    {'id': 'vid0000001', 'statistics': {'viewCount': '182000'},
+     'contentDetails': {'duration': 'PT12M30S'}},
+    {'id': 'vid0000002', 'statistics': {'viewCount': '4100'},
+     'contentDetails': {'duration': 'PT8M2S'}},
+    {'id': 'vid0000003', 'statistics': {'viewCount': '56000'},
+     'contentDetails': {'duration': 'PT15M'}},
+    # 20분 상한을 넘는 영상. 후보 화면이 미리 알려 줘야 한다.
+    {'id': 'vid0000004', 'statistics': {'viewCount': '910000'},
+     'contentDetails': {'duration': 'PT25M40S'}},
+    {'id': 'vid0000005', 'statistics': {'viewCount': '7300'},
+     'contentDetails': {'duration': 'PT5M11S'}},
+]}
+
 GEMINI_OK = {
     'id': 'v1_mock', 'object': 'interaction', 'status': 'completed',
     'model': 'gemini-3.5-flash', 'service_tier': 'standard',
@@ -145,10 +159,43 @@ if (cands.length !== 6) {
 console.log('[모의] 후보 정리 OK: 8건 -> ' + cands.length + '건, '
   + cands.map(c => c.id + ':dup' + c.duplicates).join(' '));
 
+// --- 후보 화면 검사 --------------------------------------------------
+const htmlField = fields.find(f => f.fieldType === 'html');
+if (!htmlField) throw new Error('조사 결과 html 필드가 없습니다.');
+const H = htmlField.html;
+
+if (!/<h3>유튜브 \d+개<\/h3>/.test(H)) throw new Error('유튜브 구역이 없습니다.');
+if (!/<h3>웹·블로그 \d+개<\/h3>/.test(H)) throw new Error('웹 구역이 없습니다.');
+if (H.indexOf('<h3>유튜브') > H.indexOf('<h3>웹·블로그')) {
+  throw new Error('유튜브 구역이 웹보다 뒤에 있습니다.');
+}
+if (!H.includes('form/cardnews-start-form')) throw new Error('다시 조사하기 링크가 없습니다.');
+// 25분짜리 vid0000004 는 영상 분석 상한(20분)을 넘으므로 미리 표시돼야 한다.
+if (!H.includes('영상 분석에서 제외')) throw new Error('긴 영상 경고가 없습니다.');
+if (!/\d+위 · \d+점/.test(H)) throw new Error('순위·점수 표기가 없습니다.');
+
 const cb = fields.find(f => f.fieldType === 'checkbox');
 if (!cb) throw new Error('체크박스 필드가 없습니다.');
 const opts = (cb.fieldOptions.values ?? cb.fieldOptions).map(o => o.option);
 if (opts.length < 2) throw new Error('후보 옵션이 2개 미만입니다: ' + opts.length);
+
+// 체크박스도 화면과 같은 순서여야 한다: 영상 먼저, 각 구역 안에서 점수 내림차순.
+const parsed = opts.map(o => ({
+  video: o.startsWith('[영상]'),
+  fit: Number((o.match(/(\d+)점/) || [])[1] ?? NaN),
+}));
+const firstWeb = parsed.findIndex(p => !p.video);
+if (firstWeb !== -1 && parsed.slice(firstWeb).some(p => p.video)) {
+  throw new Error('체크박스에서 영상과 웹이 섞여 있습니다: ' + opts.join(' | '));
+}
+for (const grp of [parsed.filter(p => p.video), parsed.filter(p => !p.video)]) {
+  for (let i = 1; i < grp.length; i++) {
+    if (Number.isFinite(grp[i].fit) && Number.isFinite(grp[i - 1].fit) && grp[i].fit > grp[i - 1].fit) {
+      throw new Error('점수 내림차순이 아닙니다: ' + grp.map(p => p.fit).join(','));
+    }
+  }
+}
+console.log('[모의] 후보 화면 OK: ' + opts.length + '개, 점수 ' + parsed.map(p => p.fit).join('>'));
 
 // 영상 후보 2개를 고른다. 그냥 앞 2개를 고르면 라운드로빈 순서 때문에
 // 유튜브 1 + 웹 1 이 되어 Gemini 호출이 1건뿐이고, 모의 응답의 오류 경로가
@@ -225,6 +272,16 @@ for name, payload in (('유튜브 검색', YT), ('웹 검색', TAVILY)):
     n['parameters'] = {'jsCode': 'return [{ json: %s }];' % json.dumps(payload, ensure_ascii=False)}
     n.pop('onError', None)
     n.pop('credentials', None)
+
+# 2a. 후보 조회수 -> canned response. 실제 호출을 막고, 정렬·경고 검사가
+#     실제 숫자를 보게 한다.
+v = by_name['후보 조회수']
+v['type'] = 'n8n-nodes-base.code'
+v['typeVersion'] = 2
+v['parameters'] = {'jsCode': 'return [{ json: %s }];' % json.dumps(VIEWS, ensure_ascii=False)}
+v.pop('onError', None)
+v.pop('retryOnFail', None)
+v.pop('credentials', None)
 
 # 2b. Gemini -> canned response. Stubbed so the mock never posts to Google,
 #     and so the steps[] parsing in 심층조사 지시 is actually exercised.

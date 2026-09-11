@@ -24,7 +24,7 @@
         -240,
         0
       ],
-      "id": "mock0000-0000-4000-8000-309708092768",
+      "id": "mock0000-0000-4000-8000-235980319464",
       "name": "[모의] 폼 입력"
     },
     {
@@ -89,7 +89,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const fs = require('fs');\nconst prep = $('준비').first().json;\n\nconst stripTags = s => String(s ?? '').replace(/<[^>]*>/g, '');\n// Unescape &amp; LAST, or \"&amp;lt;\" would decode twice.\nconst unescapeHtml = s => String(s ?? '')\n  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '\"')\n  .replace(/&#0?39;/g, \"'\").replace(/&apos;/g, \"'\").replace(/&nbsp;/g, ' ')\n  .replace(/&amp;/g, '&');\nconst clean = s => unescapeHtml(stripTags(s)).replace(/\\s+/g, ' ').trim();\n\n// The Code node sandbox has no URL or URLSearchParams — both throw\n// ReferenceError — so canonicalise by string. An earlier try/catch version\n// swallowed that error and silently stopped deduplicating anything.\nconst canon = (u) => {\n  const s = String(u ?? '').trim().split('#')[0];\n  if (!s) return '';\n  const yb = s.match(/^https?:\\/\\/(?:www\\.)?youtu\\.be\\/([A-Za-z0-9_-]+)/i);\n  if (yb) return 'https://www.youtube.com/watch?v=' + yb[1];\n  const qi = s.indexOf('?');\n  if (qi < 0) return s.replace(/\\/+$/, '');\n  const kept = s.slice(qi + 1).split('&')\n    .filter(p => p && !/^(utm_[^=]*|si|feature|fbclid|igshid|gclid)=/i.test(p));\n  return (kept.length ? s.slice(0, qi) + '?' + kept.join('&') : s.slice(0, qi)).replace(/\\/+$/, '');\n};\n\nconst hostOf = u => (String(u ?? '').match(/^https?:\\/\\/([^/?#]+)/i) || ['', ''])[1].replace(/^www\\./i, '');\n\nconst raw = [];\nconst sourceErrors = [];\n// Two tallies: what the API returned, and what survived the quality filters.\n// With only the second one, \"결과 0건\" blamed an empty API response even when\n// the API returned plenty and our own filters dropped every item — so the\n// screen told the user to just re-run, which could never help.\nconst apiCounts = { '유튜브': 0, '웹': 0 };\nconst counts = { '유튜브': 0, '웹': 0 };\n\nfor (const it of $input.all()) {\n  const j = it.json ?? {};\n  if (j.error) {\n    sourceErrors.push(clean(j.error.message ?? JSON.stringify(j.error)).slice(0, 200));\n    continue;\n  }\n  if (Array.isArray(j.items)) {                    // YouTube search.list\n    apiCounts['유튜브'] += j.items.length;\n    for (const v of j.items) {\n      const vid = v?.id?.videoId;\n      if (!vid) continue;\n      counts['유튜브']++;\n      const sn = v.snippet ?? {};\n      raw.push({\n        source: '유튜브', channel: clean(sn.channelTitle), title: clean(sn.title),\n        summary: clean(sn.description).slice(0, 300),\n        publishedAt: sn.publishedAt ? String(sn.publishedAt).slice(0, 10) : null,\n        url: 'https://www.youtube.com/watch?v=' + vid,\n      });\n    }\n  } else if (Array.isArray(j.results)) {           // Tavily\n    apiCounts['웹'] += j.results.length;\n    for (const r of j.results) {\n      if (!r?.url) continue;\n      // Tavily mixes in stubs with a one-word title and no body (\"기념품\").\n      // They would still eat a slot on the selection screen.\n      if (clean(r.title).length < 6 || clean(r.content).length < 20) continue;\n      // Instagram / TikTok / Facebook cannot be extracted by anything we have\n      // (verified: Tavily /extract returns failed_results for them), so they\n      // could never ground a card. Drop them instead of wasting a slot.\n      if (/(^|\\.)(instagram|tiktok|facebook|threads)\\.com$/i.test(hostOf(r.url))) continue;\n      counts['웹']++;\n      raw.push({\n        source: '웹', channel: hostOf(r.url), title: clean(r.title),\n        summary: clean(r.content).slice(0, 300),\n        publishedAt: r.published_date ? String(r.published_date).slice(0, 10) : null,\n        url: r.url,\n      });\n    }\n  }\n}\n\n// A source can answer 200 with an empty list, and it can also answer with\n// items that our filters then remove. Those need different advice: re-running\n// helps with the first and never helps with the second.\nif (counts['유튜브'] === 0) {\n  sourceErrors.push(apiCounts['유튜브'] > 0\n    ? '유튜브 ' + apiCounts['유튜브'] + '건이 왔지만 쓸 수 있는 영상이 없습니다 (영상이 아닌 채널·재생목록 결과).'\n    : '유튜브 결과 0건 — API 키, 또는 하루 100회 검색 쿼터를 확인하세요.');\n}\nif (counts['웹'] === 0) {\n  sourceErrors.push(apiCounts['웹'] > 0\n    ? '웹 ' + apiCounts['웹'] + '건이 왔지만 전부 걸러졌습니다 (제목 6자·본문 20자 미만이거나 인스타·틱톡). 다시 실행해도 같습니다 — 주제를 바꿔 보세요.'\n    : '웹 결과 0건 — Tavily가 같은 질의에도 간헐적으로 빈 응답을 줍니다. 다시 실행하면 대개 나옵니다.');\n}\n\n// same link -> one candidate\nconst byUrl = new Map();\nfor (const c of raw) {\n  const k = canon(c.url);\n  if (k && !byUrl.has(k)) byUrl.set(k, { ...c, url: k });\n}\n\n// same story -> one candidate.\n// ponytail: 제목 토큰 자카드 유사도. 오탐이 보이면 임베딩 비교로 교체\nconst toks = s => new Set(String(s).toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, ' ').split(' ').filter(w => w.length > 1));\nconst jac = (a, b) => {\n  const inter = [...a].filter(x => b.has(x)).length;\n  const uni = new Set([...a, ...b]).size;\n  return uni ? inter / uni : 0;\n};\n\n// Group within a source only. Across sources the titles overlap heavily on\n// the query words (\"여행 기념품 추천\"), so a blog post gets absorbed into a\n// video's group and the whole web source disappears from the shortlist --\n// a video and an article about the same thing are different material anyway.\nconst groups = [];\nfor (const c of byUrl.values()) {\n  const t = toks(c.title);\n  const hit = groups.find(g => g.item.source === c.source && jac(g.tokens, t) >= 0.6);\n  if (hit) { hit.also.push(c.url); continue; }\n  groups.push({ tokens: t, item: c, also: [] });\n}\n\n// Round-robin across sources before capping. Taking the first 12 outright\n// would drop the web source entirely, because YouTube returns 25 hits and\n// merges first -- which is exactly what happened on the first live run.\nconst bySrc = new Map();\nfor (const g of groups) {\n  if (!bySrc.has(g.item.source)) bySrc.set(g.item.source, []);\n  bySrc.get(g.item.source).push(g);\n}\nconst queues = [...bySrc.values()];\nconst picked = [];\nwhile (picked.length < 12 && queues.some(q => q.length)) {\n  for (const q of queues) {\n    if (!q.length) continue;\n    picked.push(q.shift());\n    if (picked.length >= 12) break;\n  }\n}\n\nconst candidates = picked.map((g, i) => ({ id: 'c' + (i + 1), ...g.item, duplicates: g.also.length }));\n\nif (!candidates.length) {\n  throw new Error('후보가 0개입니다. 검색 오류: ' + (sourceErrors.join(' / ')\n    || '없음 — 검색은 됐으나 결과가 비었습니다. 주제를 바꾸거나 기간을 30일로 넓혀 보세요.'));\n}\n\nconst prompt = [\n  '너는 카드뉴스 조사 보조다. 아래는 \"' + prep.topic + '\" 주제로 최근 ' + prep.days + '일 안에서 모은 후보다.',\n  prep.purpose ? '이 카드뉴스의 용도와 독자: ' + prep.purpose : '',\n  '',\n  '각 후보마다 두 가지를 한 줄씩 붙여라.',\n  '- value: 카드뉴스 소재로 고를 만한 이유',\n  '- uncertainty: 제목과 요약만으로는 확인되지 않는 점 (날짜 미확인, 광고·협찬 의심, 출처 불명 등)',\n  '',\n  '규칙:',\n  '- 후보에 없는 사실을 지어내지 마라. 제목과 요약에서 읽히는 것만 쓴다.',\n  '- 웹 검색을 하지 마라. 이 단계는 주어진 목록만 평가한다.',\n  '- 아래 JSON 하나만 출력하고 다른 문장은 쓰지 마라.',\n  '',\n  '{\"status\":\"result\",\"candidates\":[{\"id\":\"c1\",\"value\":\"...\",\"uncertainty\":\"...\"}]}',\n  '',\n  '후보:',\n  JSON.stringify(candidates.map(c => ({\n    id: c.id, source: c.source, channel: c.channel, title: c.title,\n    publishedAt: c.publishedAt ?? '미확인', summary: c.summary,\n  })), null, 1),\n].join('\\n');\n\nconst promptFile = prep.runDir + '/prompt-1.txt';\nfs.writeFileSync(promptFile, prompt, 'utf8');\nfs.writeFileSync(prep.runDir + '/candidates-raw.json', JSON.stringify(candidates, null, 2), 'utf8');\n\nreturn [{ json: { ...prep, candidates, sourceErrors, promptFile } }];"
+        "jsCode": "const fs = require('fs');\nconst prep = $('준비').first().json;\n\nconst stripTags = s => String(s ?? '').replace(/<[^>]*>/g, '');\n// Unescape &amp; LAST, or \"&amp;lt;\" would decode twice.\nconst unescapeHtml = s => String(s ?? '')\n  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '\"')\n  .replace(/&#0?39;/g, \"'\").replace(/&apos;/g, \"'\").replace(/&nbsp;/g, ' ')\n  .replace(/&amp;/g, '&');\nconst clean = s => unescapeHtml(stripTags(s)).replace(/\\s+/g, ' ').trim();\n\n// The Code node sandbox has no URL or URLSearchParams — both throw\n// ReferenceError — so canonicalise by string. An earlier try/catch version\n// swallowed that error and silently stopped deduplicating anything.\nconst canon = (u) => {\n  const s = String(u ?? '').trim().split('#')[0];\n  if (!s) return '';\n  const yb = s.match(/^https?:\\/\\/(?:www\\.)?youtu\\.be\\/([A-Za-z0-9_-]+)/i);\n  if (yb) return 'https://www.youtube.com/watch?v=' + yb[1];\n  const qi = s.indexOf('?');\n  if (qi < 0) return s.replace(/\\/+$/, '');\n  const kept = s.slice(qi + 1).split('&')\n    .filter(p => p && !/^(utm_[^=]*|si|feature|fbclid|igshid|gclid)=/i.test(p));\n  return (kept.length ? s.slice(0, qi) + '?' + kept.join('&') : s.slice(0, qi)).replace(/\\/+$/, '');\n};\n\nconst hostOf = u => (String(u ?? '').match(/^https?:\\/\\/([^/?#]+)/i) || ['', ''])[1].replace(/^www\\./i, '');\n\nconst raw = [];\nconst sourceErrors = [];\n// Two tallies: what the API returned, and what survived the quality filters.\n// With only the second one, \"결과 0건\" blamed an empty API response even when\n// the API returned plenty and our own filters dropped every item — so the\n// screen told the user to just re-run, which could never help.\nconst apiCounts = { '유튜브': 0, '웹': 0 };\nconst counts = { '유튜브': 0, '웹': 0 };\n\nfor (const it of $input.all()) {\n  const j = it.json ?? {};\n  if (j.error) {\n    sourceErrors.push(clean(j.error.message ?? JSON.stringify(j.error)).slice(0, 200));\n    continue;\n  }\n  if (Array.isArray(j.items)) {                    // YouTube search.list\n    apiCounts['유튜브'] += j.items.length;\n    for (const v of j.items) {\n      const vid = v?.id?.videoId;\n      if (!vid) continue;\n      counts['유튜브']++;\n      const sn = v.snippet ?? {};\n      raw.push({\n        source: '유튜브', channel: clean(sn.channelTitle), title: clean(sn.title),\n        summary: clean(sn.description).slice(0, 300),\n        publishedAt: sn.publishedAt ? String(sn.publishedAt).slice(0, 10) : null,\n        url: 'https://www.youtube.com/watch?v=' + vid,\n      });\n    }\n  } else if (Array.isArray(j.results)) {           // Tavily\n    apiCounts['웹'] += j.results.length;\n    for (const r of j.results) {\n      if (!r?.url) continue;\n      // Tavily mixes in stubs with a one-word title and no body (\"기념품\").\n      // They would still eat a slot on the selection screen.\n      if (clean(r.title).length < 6 || clean(r.content).length < 20) continue;\n      // Instagram / TikTok / Facebook cannot be extracted by anything we have\n      // (verified: Tavily /extract returns failed_results for them), so they\n      // could never ground a card. Drop them instead of wasting a slot.\n      if (/(^|\\.)(instagram|tiktok|facebook|threads)\\.com$/i.test(hostOf(r.url))) continue;\n      counts['웹']++;\n      raw.push({\n        source: '웹', channel: hostOf(r.url), title: clean(r.title),\n        summary: clean(r.content).slice(0, 300),\n        publishedAt: r.published_date ? String(r.published_date).slice(0, 10) : null,\n        url: r.url,\n      });\n    }\n  }\n}\n\n// A source can answer 200 with an empty list, and it can also answer with\n// items that our filters then remove. Those need different advice: re-running\n// helps with the first and never helps with the second.\nif (counts['유튜브'] === 0) {\n  sourceErrors.push(apiCounts['유튜브'] > 0\n    ? '유튜브 ' + apiCounts['유튜브'] + '건이 왔지만 쓸 수 있는 영상이 없습니다 (영상이 아닌 채널·재생목록 결과).'\n    : '유튜브 결과 0건 — API 키, 또는 하루 100회 검색 쿼터를 확인하세요.');\n}\nif (counts['웹'] === 0) {\n  sourceErrors.push(apiCounts['웹'] > 0\n    ? '웹 ' + apiCounts['웹'] + '건이 왔지만 전부 걸러졌습니다 (제목 6자·본문 20자 미만이거나 인스타·틱톡). 다시 실행해도 같습니다 — 주제를 바꿔 보세요.'\n    : '웹 결과 0건 — Tavily가 같은 질의에도 간헐적으로 빈 응답을 줍니다. 다시 실행하면 대개 나옵니다.');\n}\n\n// same link -> one candidate\nconst byUrl = new Map();\nfor (const c of raw) {\n  const k = canon(c.url);\n  if (k && !byUrl.has(k)) byUrl.set(k, { ...c, url: k });\n}\n\n// same story -> one candidate.\n// ponytail: 제목 토큰 자카드 유사도. 오탐이 보이면 임베딩 비교로 교체\nconst toks = s => new Set(String(s).toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, ' ').split(' ').filter(w => w.length > 1));\nconst jac = (a, b) => {\n  const inter = [...a].filter(x => b.has(x)).length;\n  const uni = new Set([...a, ...b]).size;\n  return uni ? inter / uni : 0;\n};\n\n// Group within a source only. Across sources the titles overlap heavily on\n// the query words (\"여행 기념품 추천\"), so a blog post gets absorbed into a\n// video's group and the whole web source disappears from the shortlist --\n// a video and an article about the same thing are different material anyway.\nconst groups = [];\nfor (const c of byUrl.values()) {\n  const t = toks(c.title);\n  const hit = groups.find(g => g.item.source === c.source && jac(g.tokens, t) >= 0.6);\n  if (hit) { hit.also.push(c.url); continue; }\n  groups.push({ tokens: t, item: c, also: [] });\n}\n\n// Round-robin across sources before capping. Taking the first 12 outright\n// would drop the web source entirely, because YouTube returns 25 hits and\n// merges first -- which is exactly what happened on the first live run.\nconst bySrc = new Map();\nfor (const g of groups) {\n  if (!bySrc.has(g.item.source)) bySrc.set(g.item.source, []);\n  bySrc.get(g.item.source).push(g);\n}\nconst queues = [...bySrc.values()];\nconst picked = [];\nwhile (picked.length < 12 && queues.some(q => q.length)) {\n  for (const q of queues) {\n    if (!q.length) continue;\n    picked.push(q.shift());\n    if (picked.length >= 12) break;\n  }\n}\n\nconst candidates = picked.map((g, i) => ({ id: 'c' + (i + 1), ...g.item, duplicates: g.also.length }));\n\n// 후보 화면에서 조회수로 순위를 매기려고 id 를 모아 둔다. videos.list 는\n// 1 유닛이라(search.list 는 100) 부담이 없다. 여기서 뽑는 이유는 canon() 이\n// youtu.be 를 watch?v= 로 이미 고쳐 놓은 뒤라서다.\nconst vidOf = u => (String(u ?? '').match(/[?&]v=([A-Za-z0-9_-]{6,})/) || [])[1] ?? null;\nconst candidateVideoIds = [...new Set(candidates.map(c => vidOf(c.url)).filter(Boolean))].join(',');\n\nif (!candidates.length) {\n  throw new Error('후보가 0개입니다. 검색 오류: ' + (sourceErrors.join(' / ')\n    || '없음 — 검색은 됐으나 결과가 비었습니다. 주제를 바꾸거나 기간을 30일로 넓혀 보세요.'));\n}\n\nconst prompt = [\n  '너는 카드뉴스 조사 보조다. 아래는 \"' + prep.topic + '\" 주제로 최근 ' + prep.days + '일 안에서 모은 후보다.',\n  prep.purpose ? '이 카드뉴스의 용도와 독자: ' + prep.purpose : '',\n  '',\n  '각 후보마다 세 가지를 붙여라.',\n  '- fit: 0~100 정수. 이 주제와 독자에 얼마나 맞는지.',\n  '- value: 왜 그 점수인지. 이 주제·독자와 어떻게 맞닿는지 한 줄.',\n  '- uncertainty: 제목과 요약만으로는 확인되지 않는 점 (날짜 미확인, 광고·협찬 의심, 출처 불명 등)',\n  '',\n  'fit 기준:',\n  '  80~100  주제 그대로이고 독자가 바로 쓸 수 있다',\n  '  60~79   주제에 맞지만 범위가 넓거나 일부만 해당된다',\n  '  40~59   곁가지다. 카드 한 장 정도 나올 것이다',\n  '  0~39    주제에서 벗어났다',\n  '',\n  '규칙:',\n  '- 후보에 없는 사실을 지어내지 마라. 제목과 요약에서 읽히는 것만 쓴다.',\n  '- 웹 검색을 하지 마라. 이 단계는 주어진 목록만 평가한다.',\n  '- 점수를 비슷하게 몰아주지 마라. 후보들 사이에 순서가 보이게 매겨라.',\n  '- 조회수나 유행은 판단하지 마라. 그건 따로 붙인다. 너는 주제 부합만 본다.',\n  '- 아래 JSON 하나만 출력하고 다른 문장은 쓰지 마라.',\n  '',\n  '{\"status\":\"result\",\"candidates\":[{\"id\":\"c1\",\"fit\":85,\"value\":\"...\",\"uncertainty\":\"...\"}]}',\n  '',\n  '후보:',\n  JSON.stringify(candidates.map(c => ({\n    id: c.id, source: c.source, channel: c.channel, title: c.title,\n    publishedAt: c.publishedAt ?? '미확인', summary: c.summary,\n  })), null, 1),\n].join('\\n');\n\nconst promptFile = prep.runDir + '/prompt-1.txt';\nfs.writeFileSync(promptFile, prompt, 'utf8');\nfs.writeFileSync(prep.runDir + '/candidates-raw.json', JSON.stringify(candidates, null, 2), 'utf8');\n\nreturn [{ json: { ...prep, candidates, candidateVideoIds, sourceErrors, promptFile } }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -115,7 +115,22 @@
     },
     {
       "parameters": {
-        "jsCode": "const prev = $('후보 정리').first().json;\n\n// ask-claude.ps1 hands over {sessionId, body} on success and\n// {status:'error', reason, detail} on failure.\nlet out;\ntry { out = JSON.parse($json.stdout); }\ncatch (e) { throw new Error('래퍼 출력을 JSON으로 읽지 못했습니다: ' + String($json.stdout).slice(0, 400)); }\nif (out.status === 'error') {\n  throw new Error('Claude 실패 (' + out.reason + '): ' + String(out.detail ?? '').slice(0, 300));\n}\nconst res = out.body ?? {};\n\nconst notes = new Map((res.candidates ?? []).map(c => [c.id, c]));\nconst candidates = prev.candidates.map(c => ({\n  ...c,\n  value: notes.get(c.id)?.value ?? '',\n  uncertainty: notes.get(c.id)?.uncertainty ?? '',\n}));\n\n// The html field is the one place n8n does NOT escape for us.\nconst he = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')\n  .replace(/>/g, '&gt;').replace(/\"/g, '&quot;');\nconst cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };\n\nconst head = '<p><b>조사 기준</b> ' + he(prev.researchedAt) + ' · 최근 ' + prev.days + '일 · 후보 ' + candidates.length + '개</p>'\n  + (prev.sourceErrors.length\n      ? '<p><b>소스 상태</b> ' + prev.sourceErrors.map(e => he(e)).join('<br>') + '</p>'\n      : '');\n\nconst list = candidates.map(c =>\n  '<p><b>' + he(c.id) + '. ' + he(c.title) + '</b><br>'\n  + he(c.source) + (c.channel ? ' · ' + he(c.channel) : '')\n  + ' · ' + he(c.publishedAt ?? '날짜 미확인')\n  + (c.duplicates ? ' · 같은 소재 ' + c.duplicates + '건 묶임' : '')\n  + '<br>' + he(c.summary)\n  + (c.value ? '<br><b>고를 이유</b> ' + he(c.value) : '')\n  + (c.uncertainty ? '<br><b>불확실</b> ' + he(c.uncertainty) : '')\n  + '<br><a href=\"' + he(c.url) + '\" target=\"_blank\">원문 보기</a></p>'\n).join('');\n\nconst fields = [\n  { fieldLabel: '조사 결과', fieldType: 'html', html: head + list },\n  {\n    fieldLabel: '카드뉴스로 만들 것 (1~3개)', fieldName: 'picks', fieldType: 'checkbox',\n    fieldOptions: { values: candidates.map(c => ({ option: cut(c.title, 60) + ' — ' + c.id })) },\n    requiredField: true, limitSelection: 'range', minSelections: 1, maxSelections: 3,\n  },\n];\n\n// n8n resolves this expression through String.replace, where $ starts a\n// replacement pattern. Double it so a $ in a title survives intact.\nconst formFields = JSON.stringify(fields).split('$').join('$$');\n\nreturn [{ json: { ...prev, candidates, sessionId: out.sessionId, formFields } }];"
+        "jsCode": "return [{ json: {\"kind\": \"youtube#videoListResponse\", \"items\": [{\"id\": \"vid0000001\", \"statistics\": {\"viewCount\": \"182000\"}, \"contentDetails\": {\"duration\": \"PT12M30S\"}}, {\"id\": \"vid0000002\", \"statistics\": {\"viewCount\": \"4100\"}, \"contentDetails\": {\"duration\": \"PT8M2S\"}}, {\"id\": \"vid0000003\", \"statistics\": {\"viewCount\": \"56000\"}, \"contentDetails\": {\"duration\": \"PT15M\"}}, {\"id\": \"vid0000004\", \"statistics\": {\"viewCount\": \"910000\"}, \"contentDetails\": {\"duration\": \"PT25M40S\"}}, {\"id\": \"vid0000005\", \"statistics\": {\"viewCount\": \"7300\"}, \"contentDetails\": {\"duration\": \"PT5M11S\"}}]} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        970,
+        0
+      ],
+      "id": "cafe0000-0000-4000-8000-000000000008",
+      "name": "후보 조회수",
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const prev = $('후보 정리').first().json;\n\n// ask-claude.ps1 hands over {sessionId, body} on success and\n// {status:'error', reason, detail} on failure.\n// 조회수 노드가 뒤에 붙어 $json 을 덮었으므로 이름으로 가져온다.\nlet out;\nconst raw = $('Claude: 후보 평가').first().json.stdout;\ntry { out = JSON.parse(raw); }\ncatch (e) { throw new Error('래퍼 출력을 JSON으로 읽지 못했습니다: ' + String(raw).slice(0, 400)); }\nif (out.status === 'error') {\n  throw new Error('Claude 실패 (' + out.reason + '): ' + String(out.detail ?? '').slice(0, 300));\n}\nconst res = out.body ?? {};\nconst notes = new Map((res.candidates ?? []).map(c => [c.id, c]));\n\n// 유튜브 조회수. 이 단계 Claude 는 웹 검색을 안 하므로 \"유행\" 을 판단할 근거가\n// 없다. 그래서 실제 숫자를 붙인다. 조회수 자체보다 하루 평균이 낫다 — 3년 된\n// 영상의 누적 조회수와 지난주 영상의 조회수는 같은 뜻이 아니다.\nconst stats = new Map();\ntry {\n  for (const it of ($json.items ?? [])) {\n    const sec = (String(it.contentDetails?.duration ?? '').match(/^PT(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)S)?$/) || null);\n    stats.set(it.id, {\n      views: Number(it.statistics?.viewCount ?? 0),\n      seconds: sec ? (+(sec[1] || 0)) * 3600 + (+(sec[2] || 0)) * 60 + (+(sec[3] || 0)) : null,\n    });\n  }\n} catch (e) { /* 조회수 노드가 실패했으면 점수만으로 간다 */ }\n\nconst vidOf = u => (String(u ?? '').match(/[?&]v=([A-Za-z0-9_-]{6,})/) || [])[1] ?? null;\nconst DAY = 86400000;\n\nconst candidates = prev.candidates.map(c => {\n  const n = notes.get(c.id) ?? {};\n  const st = stats.get(vidOf(c.url)) ?? {};\n  const days = c.publishedAt\n    ? Math.max(1, Math.round((Date.now() - new Date(c.publishedAt).getTime()) / DAY))\n    : null;\n  return {\n    ...c,\n    fit: Number.isFinite(+n.fit) ? Math.max(0, Math.min(100, Math.round(+n.fit))) : null,\n    value: n.value ?? '',\n    uncertainty: n.uncertainty ?? '',\n    views: st.views ?? null,\n    seconds: st.seconds ?? null,\n    perDay: (st.views && days) ? Math.round(st.views / days) : null,\n  };\n});\n\n// 주제 부합도가 1순위, 같으면 하루 평균 조회수가 2순위. 두 값을 하나로 섞지\n// 않는다 — 섞으면 왜 이 순서인지 화면에서 설명할 수가 없다.\nconst byRank = (a, b) => (b.fit ?? -1) - (a.fit ?? -1) || (b.perDay ?? -1) - (a.perDay ?? -1);\nconst yt = candidates.filter(c => c.source === '유튜브').sort(byRank);\nconst web = candidates.filter(c => c.source !== '유튜브').sort(byRank);\n\n// The html field is the one place n8n does NOT escape for us.\nconst he = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')\n  .replace(/>/g, '&gt;').replace(/\"/g, '&quot;');\nconst cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };\nconst num = v => v == null ? '' : v >= 10000 ? (v / 10000).toFixed(1) + '만' : String(v);\nconst mmss = s => s == null ? '' : Math.floor(s / 60) + '분';\n\n// 영상 분석 상한. 여기서 걸릴 영상을 고르기 전에 알려 준다.\nconst MAX_SEC = 20 * 60;\n\nconst row = (c, rank) => {\n  const meta = [\n    he(c.source),\n    c.channel ? he(c.channel) : '',\n    he(c.publishedAt ?? '날짜 미확인'),\n    c.views != null ? '조회 ' + num(c.views) + (c.perDay ? ' (하루 ' + num(c.perDay) + ')' : '') : '',\n    c.seconds != null ? mmss(c.seconds) : '',\n    c.duplicates ? '같은 소재 ' + c.duplicates + '건 묶임' : '',\n  ].filter(Boolean).join(' · ');\n\n  const warn = (c.seconds != null && c.seconds > MAX_SEC)\n    ? '<br><b>※ ' + mmss(c.seconds) + ' 영상이라 Gemini 영상 분석에서 제외됩니다 (설명란만 사용)</b>'\n    : '';\n\n  return '<p><b>' + rank + '위 · ' + (c.fit == null ? '점수 없음' : c.fit + '점') + ' — ' + he(c.title) + '</b>'\n    + '<br>' + meta\n    + '<br>' + he(c.summary)\n    + (c.value ? '<br><b>고른 이유</b> ' + he(c.value) : '')\n    + (c.uncertainty ? '<br><b>불확실</b> ' + he(c.uncertainty) : '')\n    + warn\n    + '<br><a href=\"' + he(c.url) + '\" target=\"_blank\" rel=\"noopener\">원문 보기</a>'\n    + ' · 체크박스에서 <b>' + he(c.id) + '</b> 을 찾으세요</p>';\n};\n\nconst section = (title, arr) => '<h3>' + title + ' ' + arr.length + '개</h3>'\n  + (arr.length ? arr.map((c, i) => row(c, i + 1)).join('') : '<p>없습니다.</p>');\n\nconst head = '<p><b>조사 기준</b> ' + he(prev.researchedAt) + ' · 최근 ' + prev.days + '일 · 후보 ' + candidates.length + '개</p>'\n  + (prev.sourceErrors.length\n      ? '<p><b>소스 상태</b> ' + prev.sourceErrors.map(e => he(e)).join('<br>') + '</p>'\n      : '')\n  // 점수가 무엇이고 무엇이 아닌지 화면에서 밝힌다. \"유행 점수\" 로 오해하면\n  // 근거 없는 숫자를 믿게 된다.\n  + '<p><b>점수는 주제 부합도입니다</b> — 제목과 요약만 보고 매긴 것이고, 유행 지표가 아닙니다.'\n  + ' 조회수는 실제 숫자이며 같은 점수일 때 순서를 가릅니다.</p>'\n  + '<p><a href=\"' + 'http://localhost:5678/form/cardnews-start-form' + '\">← 주제를 바꿔 처음부터 다시 조사하기</a>'\n  + ' (새 조사가 시작되고 이 화면은 그대로 남습니다)</p>';\n\nconst fields = [\n  { fieldLabel: '조사 결과', fieldType: 'html',\n    html: head + section('유튜브', yt) + section('웹·블로그', web) },\n  {\n    fieldLabel: '카드뉴스로 만들 것 (1~3개)', fieldName: 'picks', fieldType: 'checkbox',\n    // 화면에 보인 순서 그대로 둔다. 화면은 유튜브가 먼저인데 체크박스는\n    // 다른 순서면 고를 때마다 눈으로 다시 찾아야 한다.\n    fieldOptions: { values: [...yt, ...web].map(c =>\n      ({ option: (c.source === '유튜브' ? '[영상] ' : '[웹] ')\n          + (c.fit == null ? '' : c.fit + '점 ')\n          + cut(c.title, 54) + ' — ' + c.id })) },\n    requiredField: true, limitSelection: 'range', minSelections: 1, maxSelections: 3,\n  },\n];\n\n// n8n resolves this expression through String.replace, where $ starts a\n// replacement pattern. Double it so a $ in a title survives intact.\nconst formFields = JSON.stringify(fields).split('$').join('$$');\n\nreturn [{ json: { ...prev, candidates, sessionId: out.sessionId, formFields } }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -123,12 +138,12 @@
         1080,
         0
       ],
-      "id": "cafe0000-0000-4000-8000-000000000008",
+      "id": "cafe0000-0000-4000-8000-000000000009",
       "name": "후보 화면 만들기"
     },
     {
       "parameters": {
-        "jsCode": "const ALLOWED_KEYS = ['fieldLabel','fieldType','placeholder','defaultValue','fieldOptions',\n  'multiselect','multipleFiles','acceptFileTypes','formatDate','requiredField','fieldValue',\n  'elementName','html','fieldName','limitSelection','numberOfSelections','minSelections','maxSelections'];\nconst ALLOWED_TYPES = ['date','dropdown','email','file','number','password','text','textarea',\n  'checkbox','radio','html','hiddenField'];\n\nconst rawStr = String($json.formFields ?? '');\nif (!rawStr) throw new Error('formFields 가 비어 있습니다.');\n\n// n8n undoes the $$ escaping when it splices the value in, so undo it here too.\nconst fields = JSON.parse(rawStr.split('$$').join('$'));\nif (!Array.isArray(fields)) throw new Error('formFields 가 배열이 아닙니다.');\n\nfields.forEach((f, i) => {\n  for (const k of Object.keys(f)) {\n    if (!ALLOWED_KEYS.includes(k)) throw new Error('필드 ' + i + ' 의 키 \"' + k + '\" 는 허용되지 않습니다.');\n  }\n  if (f.fieldType && !ALLOWED_TYPES.includes(f.fieldType)) {\n    throw new Error('필드 ' + i + ' 의 fieldType \"' + f.fieldType + '\" 는 허용되지 않습니다.');\n  }\n  if (f.fieldOptions) {\n    const values = Array.isArray(f.fieldOptions) ? f.fieldOptions : f.fieldOptions.values;\n    if (!Array.isArray(values)) throw new Error('필드 ' + i + ' 의 fieldOptions.values 가 배열이 아닙니다.');\n    values.forEach((o, j) => {\n      if (typeof o !== 'object' || o === null || Object.keys(o).length !== 1 || typeof o.option !== 'string') {\n        throw new Error('필드 ' + i + ' 의 옵션 ' + j + ' 는 { option: \"문자열\" } 하나여야 합니다.');\n      }\n    });\n  }\n});\n\n// --- regression checks on 후보 정리 -------------------------------------\n// The mock feeds 8 raw hits: 5 YouTube (two with near-identical titles) and\n// 3 web (one of them a youtu.be link to an already-listed video, one carrying\n// utm_source & si). Expect 8 -> 6: one dropped by URL, one merged by title.\nconst cands = $json.candidates ?? [];\nconst dirty = cands.filter(c => /utm_|[?&]si=|youtu\\.be/i.test(c.url));\nif (dirty.length) throw new Error('URL 정규화 실패: ' + dirty.map(c => c.url).join(', '));\nif (cands.length !== 6) {\n  throw new Error('중복 묶기 결과가 6개가 아닙니다: ' + cands.length\n    + ' — ' + cands.map(c => c.id + '(dup' + c.duplicates + ')').join(' '));\n}\nconsole.log('[모의] 후보 정리 OK: 8건 -> ' + cands.length + '건, '\n  + cands.map(c => c.id + ':dup' + c.duplicates).join(' '));\n\nconst cb = fields.find(f => f.fieldType === 'checkbox');\nif (!cb) throw new Error('체크박스 필드가 없습니다.');\nconst opts = (cb.fieldOptions.values ?? cb.fieldOptions).map(o => o.option);\nif (opts.length < 2) throw new Error('후보 옵션이 2개 미만입니다: ' + opts.length);\n\n// 영상 후보 2개를 고른다. 그냥 앞 2개를 고르면 라운드로빈 순서 때문에\n// 유튜브 1 + 웹 1 이 되어 Gemini 호출이 1건뿐이고, 모의 응답의 오류 경로가\n// 안 돈다. 아이디로 골라야 옵션 텍스트 형식에 의존하지 않는다.\nconst vidIds = cands.filter(c => /[?&]v=|youtu\\.be\\//.test(c.url)).map(c => c.id);\nif (vidIds.length < 2) throw new Error('영상 후보가 2개 미만입니다: ' + vidIds.length);\nconst picks = vidIds.slice(0, 2).map(id => {\n  const o = opts.find(t => t.endsWith('— ' + id) || t.endsWith('' + id));\n  if (!o) throw new Error('후보 ' + id + ' 에 해당하는 옵션을 못 찾았습니다.');\n  return o;\n});\nconsole.log('[모의] 후보 옵션 ' + opts.length + '개, 영상 2개 선택: ' + picks.join(' | '));\nreturn [{ json: { picks } }];"
+        "jsCode": "const ALLOWED_KEYS = ['fieldLabel','fieldType','placeholder','defaultValue','fieldOptions',\n  'multiselect','multipleFiles','acceptFileTypes','formatDate','requiredField','fieldValue',\n  'elementName','html','fieldName','limitSelection','numberOfSelections','minSelections','maxSelections'];\nconst ALLOWED_TYPES = ['date','dropdown','email','file','number','password','text','textarea',\n  'checkbox','radio','html','hiddenField'];\n\nconst rawStr = String($json.formFields ?? '');\nif (!rawStr) throw new Error('formFields 가 비어 있습니다.');\n\n// n8n undoes the $$ escaping when it splices the value in, so undo it here too.\nconst fields = JSON.parse(rawStr.split('$$').join('$'));\nif (!Array.isArray(fields)) throw new Error('formFields 가 배열이 아닙니다.');\n\nfields.forEach((f, i) => {\n  for (const k of Object.keys(f)) {\n    if (!ALLOWED_KEYS.includes(k)) throw new Error('필드 ' + i + ' 의 키 \"' + k + '\" 는 허용되지 않습니다.');\n  }\n  if (f.fieldType && !ALLOWED_TYPES.includes(f.fieldType)) {\n    throw new Error('필드 ' + i + ' 의 fieldType \"' + f.fieldType + '\" 는 허용되지 않습니다.');\n  }\n  if (f.fieldOptions) {\n    const values = Array.isArray(f.fieldOptions) ? f.fieldOptions : f.fieldOptions.values;\n    if (!Array.isArray(values)) throw new Error('필드 ' + i + ' 의 fieldOptions.values 가 배열이 아닙니다.');\n    values.forEach((o, j) => {\n      if (typeof o !== 'object' || o === null || Object.keys(o).length !== 1 || typeof o.option !== 'string') {\n        throw new Error('필드 ' + i + ' 의 옵션 ' + j + ' 는 { option: \"문자열\" } 하나여야 합니다.');\n      }\n    });\n  }\n});\n\n// --- regression checks on 후보 정리 -------------------------------------\n// The mock feeds 8 raw hits: 5 YouTube (two with near-identical titles) and\n// 3 web (one of them a youtu.be link to an already-listed video, one carrying\n// utm_source & si). Expect 8 -> 6: one dropped by URL, one merged by title.\nconst cands = $json.candidates ?? [];\nconst dirty = cands.filter(c => /utm_|[?&]si=|youtu\\.be/i.test(c.url));\nif (dirty.length) throw new Error('URL 정규화 실패: ' + dirty.map(c => c.url).join(', '));\nif (cands.length !== 6) {\n  throw new Error('중복 묶기 결과가 6개가 아닙니다: ' + cands.length\n    + ' — ' + cands.map(c => c.id + '(dup' + c.duplicates + ')').join(' '));\n}\nconsole.log('[모의] 후보 정리 OK: 8건 -> ' + cands.length + '건, '\n  + cands.map(c => c.id + ':dup' + c.duplicates).join(' '));\n\n// --- 후보 화면 검사 --------------------------------------------------\nconst htmlField = fields.find(f => f.fieldType === 'html');\nif (!htmlField) throw new Error('조사 결과 html 필드가 없습니다.');\nconst H = htmlField.html;\n\nif (!/<h3>유튜브 \\d+개<\\/h3>/.test(H)) throw new Error('유튜브 구역이 없습니다.');\nif (!/<h3>웹·블로그 \\d+개<\\/h3>/.test(H)) throw new Error('웹 구역이 없습니다.');\nif (H.indexOf('<h3>유튜브') > H.indexOf('<h3>웹·블로그')) {\n  throw new Error('유튜브 구역이 웹보다 뒤에 있습니다.');\n}\nif (!H.includes('form/cardnews-start-form')) throw new Error('다시 조사하기 링크가 없습니다.');\n// 25분짜리 vid0000004 는 영상 분석 상한(20분)을 넘으므로 미리 표시돼야 한다.\nif (!H.includes('영상 분석에서 제외')) throw new Error('긴 영상 경고가 없습니다.');\nif (!/\\d+위 · \\d+점/.test(H)) throw new Error('순위·점수 표기가 없습니다.');\n\nconst cb = fields.find(f => f.fieldType === 'checkbox');\nif (!cb) throw new Error('체크박스 필드가 없습니다.');\nconst opts = (cb.fieldOptions.values ?? cb.fieldOptions).map(o => o.option);\nif (opts.length < 2) throw new Error('후보 옵션이 2개 미만입니다: ' + opts.length);\n\n// 체크박스도 화면과 같은 순서여야 한다: 영상 먼저, 각 구역 안에서 점수 내림차순.\nconst parsed = opts.map(o => ({\n  video: o.startsWith('[영상]'),\n  fit: Number((o.match(/(\\d+)점/) || [])[1] ?? NaN),\n}));\nconst firstWeb = parsed.findIndex(p => !p.video);\nif (firstWeb !== -1 && parsed.slice(firstWeb).some(p => p.video)) {\n  throw new Error('체크박스에서 영상과 웹이 섞여 있습니다: ' + opts.join(' | '));\n}\nfor (const grp of [parsed.filter(p => p.video), parsed.filter(p => !p.video)]) {\n  for (let i = 1; i < grp.length; i++) {\n    if (Number.isFinite(grp[i].fit) && Number.isFinite(grp[i - 1].fit) && grp[i].fit > grp[i - 1].fit) {\n      throw new Error('점수 내림차순이 아닙니다: ' + grp.map(p => p.fit).join(','));\n    }\n  }\n}\nconsole.log('[모의] 후보 화면 OK: ' + opts.length + '개, 점수 ' + parsed.map(p => p.fit).join('>'));\n\n// 영상 후보 2개를 고른다. 그냥 앞 2개를 고르면 라운드로빈 순서 때문에\n// 유튜브 1 + 웹 1 이 되어 Gemini 호출이 1건뿐이고, 모의 응답의 오류 경로가\n// 안 돈다. 아이디로 골라야 옵션 텍스트 형식에 의존하지 않는다.\nconst vidIds = cands.filter(c => /[?&]v=|youtu\\.be\\//.test(c.url)).map(c => c.id);\nif (vidIds.length < 2) throw new Error('영상 후보가 2개 미만입니다: ' + vidIds.length);\nconst picks = vidIds.slice(0, 2).map(id => {\n  const o = opts.find(t => t.endsWith('— ' + id) || t.endsWith('' + id));\n  if (!o) throw new Error('후보 ' + id + ' 에 해당하는 옵션을 못 찾았습니다.');\n  return o;\n});\nconsole.log('[모의] 후보 옵션 ' + opts.length + '개, 영상 2개 선택: ' + picks.join(' | '));\nreturn [{ json: { picks } }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -136,7 +151,7 @@
         1300,
         0
       ],
-      "id": "cafe0000-0000-4000-8000-000000000009",
+      "id": "cafe0000-0000-4000-8000-000000000010",
       "name": "후보 선택"
     },
     {
@@ -149,7 +164,7 @@
         1520,
         0
       ],
-      "id": "cafe0000-0000-4000-8000-000000000010",
+      "id": "cafe0000-0000-4000-8000-000000000011",
       "name": "선택 정리"
     },
     {
@@ -178,7 +193,7 @@
         1740,
         -110
       ],
-      "id": "cafe0000-0000-4000-8000-000000000011",
+      "id": "cafe0000-0000-4000-8000-000000000012",
       "name": "유튜브 원문",
       "onError": "continueRegularOutput",
       "retryOnFail": true,
@@ -202,7 +217,7 @@
         1960,
         -110
       ],
-      "id": "cafe0000-0000-4000-8000-000000000012",
+      "id": "cafe0000-0000-4000-8000-000000000013",
       "name": "웹 원문",
       "onError": "continueRegularOutput",
       "retryOnFail": true,
@@ -219,7 +234,7 @@
         1740,
         90
       ],
-      "id": "cafe0000-0000-4000-8000-000000000013",
+      "id": "cafe0000-0000-4000-8000-000000000014",
       "name": "영상 분석 대상"
     },
     {
@@ -232,7 +247,7 @@
         1960,
         90
       ],
-      "id": "cafe0000-0000-4000-8000-000000000014",
+      "id": "cafe0000-0000-4000-8000-000000000015",
       "name": "제미나이 영상 분석",
       "maxTries": 2,
       "waitBetweenTries": 5000
@@ -247,7 +262,7 @@
         2180,
         -110
       ],
-      "id": "cafe0000-0000-4000-8000-000000000015",
+      "id": "cafe0000-0000-4000-8000-000000000016",
       "name": "심층조사 지시"
     },
     {
@@ -260,7 +275,7 @@
         2400,
         -110
       ],
-      "id": "cafe0000-0000-4000-8000-000000000016",
+      "id": "cafe0000-0000-4000-8000-000000000017",
       "name": "Claude: 심층조사"
     },
     {
@@ -273,7 +288,7 @@
         2620,
         -110
       ],
-      "id": "cafe0000-0000-4000-8000-000000000017",
+      "id": "cafe0000-0000-4000-8000-000000000018",
       "name": "응답 파싱"
     },
     {
@@ -287,7 +302,7 @@
           },
           "conditions": [
             {
-              "id": "cond-18",
+              "id": "cond-19",
               "leftValue": "={{ $json.status }}",
               "rightValue": "need_input",
               "operator": {
@@ -306,7 +321,7 @@
         2840,
         -110
       ],
-      "id": "cafe0000-0000-4000-8000-000000000018",
+      "id": "cafe0000-0000-4000-8000-000000000019",
       "name": "질문인가?"
     },
     {
@@ -319,7 +334,7 @@
         3060,
         -300
       ],
-      "id": "cafe0000-0000-4000-8000-000000000019",
+      "id": "cafe0000-0000-4000-8000-000000000020",
       "name": "질문"
     },
     {
@@ -332,7 +347,7 @@
         3280,
         -300
       ],
-      "id": "cafe0000-0000-4000-8000-000000000020",
+      "id": "cafe0000-0000-4000-8000-000000000021",
       "name": "답변 전달"
     },
     {
@@ -345,7 +360,7 @@
         3060,
         60
       ],
-      "id": "cafe0000-0000-4000-8000-000000000021",
+      "id": "cafe0000-0000-4000-8000-000000000022",
       "name": "원문 대조"
     },
     {
@@ -358,7 +373,7 @@
         3280,
         60
       ],
-      "id": "cafe0000-0000-4000-8000-000000000022",
+      "id": "cafe0000-0000-4000-8000-000000000023",
       "name": "제품컷 찾기"
     },
     {
@@ -378,7 +393,7 @@
         3500,
         60
       ],
-      "id": "cafe0000-0000-4000-8000-000000000023",
+      "id": "cafe0000-0000-4000-8000-000000000024",
       "name": "제품컷 검색",
       "onError": "continueRegularOutput",
       "retryOnFail": true,
@@ -395,7 +410,7 @@
         3720,
         60
       ],
-      "id": "cafe0000-0000-4000-8000-000000000024",
+      "id": "cafe0000-0000-4000-8000-000000000025",
       "name": "스토리보드 화면 만들기"
     },
     {
@@ -408,7 +423,7 @@
         3940,
         60
       ],
-      "id": "cafe0000-0000-4000-8000-000000000025",
+      "id": "cafe0000-0000-4000-8000-000000000026",
       "name": "스토리보드 승인"
     },
     {
@@ -422,7 +437,7 @@
           },
           "conditions": [
             {
-              "id": "cond-26",
+              "id": "cond-27",
               "leftValue": "={{ $json.decision ?? $json['진행 여부'] }}",
               "rightValue": "승인",
               "operator": {
@@ -441,7 +456,7 @@
         4160,
         60
       ],
-      "id": "cafe0000-0000-4000-8000-000000000026",
+      "id": "cafe0000-0000-4000-8000-000000000027",
       "name": "승인인가?"
     },
     {
@@ -454,7 +469,7 @@
         4380,
         -40
       ],
-      "id": "cafe0000-0000-4000-8000-000000000027",
+      "id": "cafe0000-0000-4000-8000-000000000028",
       "name": "저장"
     },
     {
@@ -467,7 +482,7 @@
         4380,
         200
       ],
-      "id": "cafe0000-0000-4000-8000-000000000028",
+      "id": "cafe0000-0000-4000-8000-000000000029",
       "name": "수정 지시"
     },
     {
@@ -480,7 +495,7 @@
         4600,
         -40
       ],
-      "id": "cafe0000-0000-4000-8000-000000000029",
+      "id": "cafe0000-0000-4000-8000-000000000030",
       "name": "완료"
     }
   ],
@@ -546,6 +561,17 @@
       ]
     },
     "Claude: 후보 평가": {
+      "main": [
+        [
+          {
+            "node": "후보 조회수",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "후보 조회수": {
       "main": [
         [
           {

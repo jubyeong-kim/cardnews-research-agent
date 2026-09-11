@@ -6,6 +6,9 @@ ROOT = 'C:/Users/jb660/Desktop/project_2/n8n'
 ASK  = ROOT + '/scripts/ask-claude.ps1'
 RUNS = ROOT + '/runs'
 OUT  = ROOT + '/workflows/cardnews-mvp.json'
+# 후보 화면의 "다시 조사하기" 링크가 가리킬 곳. 폼 경로는 노드의 path 가
+# 아니라 webhookId 다 (README 참조).
+FORM_URL = 'http://localhost:5678/form/cardnews-start-form'
 
 
 def cmd(session=False):
@@ -187,6 +190,12 @@ while (picked.length < 12 && queues.some(q => q.length)) {
 
 const candidates = picked.map((g, i) => ({ id: 'c' + (i + 1), ...g.item, duplicates: g.also.length }));
 
+// 후보 화면에서 조회수로 순위를 매기려고 id 를 모아 둔다. videos.list 는
+// 1 유닛이라(search.list 는 100) 부담이 없다. 여기서 뽑는 이유는 canon() 이
+// youtu.be 를 watch?v= 로 이미 고쳐 놓은 뒤라서다.
+const vidOf = u => (String(u ?? '').match(/[?&]v=([A-Za-z0-9_-]{6,})/) || [])[1] ?? null;
+const candidateVideoIds = [...new Set(candidates.map(c => vidOf(c.url)).filter(Boolean))].join(',');
+
 if (!candidates.length) {
   throw new Error('후보가 0개입니다. 검색 오류: ' + (sourceErrors.join(' / ')
     || '없음 — 검색은 됐으나 결과가 비었습니다. 주제를 바꾸거나 기간을 30일로 넓혀 보세요.'));
@@ -196,16 +205,25 @@ const prompt = [
   '너는 카드뉴스 조사 보조다. 아래는 "' + prep.topic + '" 주제로 최근 ' + prep.days + '일 안에서 모은 후보다.',
   prep.purpose ? '이 카드뉴스의 용도와 독자: ' + prep.purpose : '',
   '',
-  '각 후보마다 두 가지를 한 줄씩 붙여라.',
-  '- value: 카드뉴스 소재로 고를 만한 이유',
+  '각 후보마다 세 가지를 붙여라.',
+  '- fit: 0~100 정수. 이 주제와 독자에 얼마나 맞는지.',
+  '- value: 왜 그 점수인지. 이 주제·독자와 어떻게 맞닿는지 한 줄.',
   '- uncertainty: 제목과 요약만으로는 확인되지 않는 점 (날짜 미확인, 광고·협찬 의심, 출처 불명 등)',
+  '',
+  'fit 기준:',
+  '  80~100  주제 그대로이고 독자가 바로 쓸 수 있다',
+  '  60~79   주제에 맞지만 범위가 넓거나 일부만 해당된다',
+  '  40~59   곁가지다. 카드 한 장 정도 나올 것이다',
+  '  0~39    주제에서 벗어났다',
   '',
   '규칙:',
   '- 후보에 없는 사실을 지어내지 마라. 제목과 요약에서 읽히는 것만 쓴다.',
   '- 웹 검색을 하지 마라. 이 단계는 주어진 목록만 평가한다.',
+  '- 점수를 비슷하게 몰아주지 마라. 후보들 사이에 순서가 보이게 매겨라.',
+  '- 조회수나 유행은 판단하지 마라. 그건 따로 붙인다. 너는 주제 부합만 본다.',
   '- 아래 JSON 하나만 출력하고 다른 문장은 쓰지 마라.',
   '',
-  '{"status":"result","candidates":[{"id":"c1","value":"...","uncertainty":"..."}]}',
+  '{"status":"result","candidates":[{"id":"c1","fit":85,"value":"...","uncertainty":"..."}]}',
   '',
   '후보:',
   JSON.stringify(candidates.map(c => ({
@@ -218,7 +236,7 @@ const promptFile = prep.runDir + '/prompt-1.txt';
 fs.writeFileSync(promptFile, prompt, 'utf8');
 fs.writeFileSync(prep.runDir + '/candidates-raw.json', JSON.stringify(candidates, null, 2), 'utf8');
 
-return [{ json: { ...prep, candidates, sourceErrors, promptFile } }];
+return [{ json: { ...prep, candidates, candidateVideoIds, sourceErrors, promptFile } }];
 """.strip()
 
 JS_PICK_FORM = r"""
@@ -226,47 +244,116 @@ const prev = $('후보 정리').first().json;
 
 // ask-claude.ps1 hands over {sessionId, body} on success and
 // {status:'error', reason, detail} on failure.
+// 조회수 노드가 뒤에 붙어 $json 을 덮었으므로 이름으로 가져온다.
 let out;
-try { out = JSON.parse($json.stdout); }
-catch (e) { throw new Error('래퍼 출력을 JSON으로 읽지 못했습니다: ' + String($json.stdout).slice(0, 400)); }
+const raw = $('Claude: 후보 평가').first().json.stdout;
+try { out = JSON.parse(raw); }
+catch (e) { throw new Error('래퍼 출력을 JSON으로 읽지 못했습니다: ' + String(raw).slice(0, 400)); }
 if (out.status === 'error') {
   throw new Error('Claude 실패 (' + out.reason + '): ' + String(out.detail ?? '').slice(0, 300));
 }
 const res = out.body ?? {};
-
 const notes = new Map((res.candidates ?? []).map(c => [c.id, c]));
-const candidates = prev.candidates.map(c => ({
-  ...c,
-  value: notes.get(c.id)?.value ?? '',
-  uncertainty: notes.get(c.id)?.uncertainty ?? '',
-}));
+
+// 유튜브 조회수. 이 단계 Claude 는 웹 검색을 안 하므로 "유행" 을 판단할 근거가
+// 없다. 그래서 실제 숫자를 붙인다. 조회수 자체보다 하루 평균이 낫다 — 3년 된
+// 영상의 누적 조회수와 지난주 영상의 조회수는 같은 뜻이 아니다.
+const stats = new Map();
+try {
+  for (const it of ($json.items ?? [])) {
+    const sec = (String(it.contentDetails?.duration ?? '').match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/) || null);
+    stats.set(it.id, {
+      views: Number(it.statistics?.viewCount ?? 0),
+      seconds: sec ? (+(sec[1] || 0)) * 3600 + (+(sec[2] || 0)) * 60 + (+(sec[3] || 0)) : null,
+    });
+  }
+} catch (e) { /* 조회수 노드가 실패했으면 점수만으로 간다 */ }
+
+const vidOf = u => (String(u ?? '').match(/[?&]v=([A-Za-z0-9_-]{6,})/) || [])[1] ?? null;
+const DAY = 86400000;
+
+const candidates = prev.candidates.map(c => {
+  const n = notes.get(c.id) ?? {};
+  const st = stats.get(vidOf(c.url)) ?? {};
+  const days = c.publishedAt
+    ? Math.max(1, Math.round((Date.now() - new Date(c.publishedAt).getTime()) / DAY))
+    : null;
+  return {
+    ...c,
+    fit: Number.isFinite(+n.fit) ? Math.max(0, Math.min(100, Math.round(+n.fit))) : null,
+    value: n.value ?? '',
+    uncertainty: n.uncertainty ?? '',
+    views: st.views ?? null,
+    seconds: st.seconds ?? null,
+    perDay: (st.views && days) ? Math.round(st.views / days) : null,
+  };
+});
+
+// 주제 부합도가 1순위, 같으면 하루 평균 조회수가 2순위. 두 값을 하나로 섞지
+// 않는다 — 섞으면 왜 이 순서인지 화면에서 설명할 수가 없다.
+const byRank = (a, b) => (b.fit ?? -1) - (a.fit ?? -1) || (b.perDay ?? -1) - (a.perDay ?? -1);
+const yt = candidates.filter(c => c.source === '유튜브').sort(byRank);
+const web = candidates.filter(c => c.source !== '유튜브').sort(byRank);
 
 // The html field is the one place n8n does NOT escape for us.
 const he = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+const num = v => v == null ? '' : v >= 10000 ? (v / 10000).toFixed(1) + '만' : String(v);
+const mmss = s => s == null ? '' : Math.floor(s / 60) + '분';
+
+// 영상 분석 상한. 여기서 걸릴 영상을 고르기 전에 알려 준다.
+const MAX_SEC = 20 * 60;
+
+const row = (c, rank) => {
+  const meta = [
+    he(c.source),
+    c.channel ? he(c.channel) : '',
+    he(c.publishedAt ?? '날짜 미확인'),
+    c.views != null ? '조회 ' + num(c.views) + (c.perDay ? ' (하루 ' + num(c.perDay) + ')' : '') : '',
+    c.seconds != null ? mmss(c.seconds) : '',
+    c.duplicates ? '같은 소재 ' + c.duplicates + '건 묶임' : '',
+  ].filter(Boolean).join(' · ');
+
+  const warn = (c.seconds != null && c.seconds > MAX_SEC)
+    ? '<br><b>※ ' + mmss(c.seconds) + ' 영상이라 Gemini 영상 분석에서 제외됩니다 (설명란만 사용)</b>'
+    : '';
+
+  return '<p><b>' + rank + '위 · ' + (c.fit == null ? '점수 없음' : c.fit + '점') + ' — ' + he(c.title) + '</b>'
+    + '<br>' + meta
+    + '<br>' + he(c.summary)
+    + (c.value ? '<br><b>고른 이유</b> ' + he(c.value) : '')
+    + (c.uncertainty ? '<br><b>불확실</b> ' + he(c.uncertainty) : '')
+    + warn
+    + '<br><a href="' + he(c.url) + '" target="_blank" rel="noopener">원문 보기</a>'
+    + ' · 체크박스에서 <b>' + he(c.id) + '</b> 을 찾으세요</p>';
+};
+
+const section = (title, arr) => '<h3>' + title + ' ' + arr.length + '개</h3>'
+  + (arr.length ? arr.map((c, i) => row(c, i + 1)).join('') : '<p>없습니다.</p>');
 
 const head = '<p><b>조사 기준</b> ' + he(prev.researchedAt) + ' · 최근 ' + prev.days + '일 · 후보 ' + candidates.length + '개</p>'
   + (prev.sourceErrors.length
       ? '<p><b>소스 상태</b> ' + prev.sourceErrors.map(e => he(e)).join('<br>') + '</p>'
-      : '');
-
-const list = candidates.map(c =>
-  '<p><b>' + he(c.id) + '. ' + he(c.title) + '</b><br>'
-  + he(c.source) + (c.channel ? ' · ' + he(c.channel) : '')
-  + ' · ' + he(c.publishedAt ?? '날짜 미확인')
-  + (c.duplicates ? ' · 같은 소재 ' + c.duplicates + '건 묶임' : '')
-  + '<br>' + he(c.summary)
-  + (c.value ? '<br><b>고를 이유</b> ' + he(c.value) : '')
-  + (c.uncertainty ? '<br><b>불확실</b> ' + he(c.uncertainty) : '')
-  + '<br><a href="' + he(c.url) + '" target="_blank">원문 보기</a></p>'
-).join('');
+      : '')
+  // 점수가 무엇이고 무엇이 아닌지 화면에서 밝힌다. "유행 점수" 로 오해하면
+  // 근거 없는 숫자를 믿게 된다.
+  + '<p><b>점수는 주제 부합도입니다</b> — 제목과 요약만 보고 매긴 것이고, 유행 지표가 아닙니다.'
+  + ' 조회수는 실제 숫자이며 같은 점수일 때 순서를 가릅니다.</p>'
+  + '<p><a href="' + FORM_URL_PLACEHOLDER + '">← 주제를 바꿔 처음부터 다시 조사하기</a>'
+  + ' (새 조사가 시작되고 이 화면은 그대로 남습니다)</p>';
 
 const fields = [
-  { fieldLabel: '조사 결과', fieldType: 'html', html: head + list },
+  { fieldLabel: '조사 결과', fieldType: 'html',
+    html: head + section('유튜브', yt) + section('웹·블로그', web) },
   {
     fieldLabel: '카드뉴스로 만들 것 (1~3개)', fieldName: 'picks', fieldType: 'checkbox',
-    fieldOptions: { values: candidates.map(c => ({ option: cut(c.title, 60) + ' — ' + c.id })) },
+    // 화면에 보인 순서 그대로 둔다. 화면은 유튜브가 먼저인데 체크박스는
+    // 다른 순서면 고를 때마다 눈으로 다시 찾아야 한다.
+    fieldOptions: { values: [...yt, ...web].map(c =>
+      ({ option: (c.source === '유튜브' ? '[영상] ' : '[웹] ')
+          + (c.fit == null ? '' : c.fit + '점 ')
+          + cut(c.title, 54) + ' — ' + c.id })) },
     requiredField: true, limitSelection: 'range', minSelections: 1, maxSelections: 3,
   },
 ];
@@ -276,7 +363,7 @@ const fields = [
 const formFields = JSON.stringify(fields).split('$').join('$$');
 
 return [{ json: { ...prev, candidates, sessionId: out.sessionId, formFields } }];
-""".strip()
+""".strip().replace('FORM_URL_PLACEHOLDER', repr(FORM_URL))
 
 JS_PICKED = r"""
 const fs = require('fs');
@@ -1106,6 +1193,22 @@ nodes = [
 
     code('후보 정리', JS_CANDIDATES, [640, 0]),
     node('Claude: 후보 평가', 'n8n-nodes-base.executeCommand', 1, {'command': cmd()}, [860, 0]),
+
+    # 후보 순위에 실제 숫자를 하나 붙인다. 이 단계 Claude 는 웹 검색을 안 해서
+    # "유행" 을 판단할 근거가 없다. videos.list 는 1 유닛이라(search.list 는
+    # 100) 부담이 없고, 길이도 같이 받아 20분 넘는 영상을 미리 표시한다.
+    node('후보 조회수', 'n8n-nodes-base.httpRequest', 4.5, {
+        'url': 'https://www.googleapis.com/youtube/v3/videos',
+        'authentication': 'genericCredentialType', 'genericAuthType': 'httpQueryAuth',
+        'sendQuery': True,
+        'queryParameters': {'parameters': [
+            {'name': 'part', 'value': 'statistics,contentDetails'},
+            {'name': 'id', 'value': "={{ $('후보 정리').first().json.candidateVideoIds }}"},
+        ]},
+        'options': {},
+    }, [970, 0], {'onError': 'continueRegularOutput',
+                  'retryOnFail': True, 'maxTries': 3, 'waitBetweenTries': 2000}),
+
     code('후보 화면 만들기', JS_PICK_FORM, [1080, 0]),
     form_page('후보 선택', '={{ $json.formFields }}', [1300, 0], '이걸로 만들기'),
     code('선택 정리', JS_PICKED, [1520, 0]),
@@ -1228,7 +1331,8 @@ connections = {
     '웹 검색': {'main': [m('소스 합치기', 1)]},
     '소스 합치기': {'main': [m('후보 정리')]},
     '후보 정리': {'main': [m('Claude: 후보 평가')]},
-    'Claude: 후보 평가': {'main': [m('후보 화면 만들기')]},
+    'Claude: 후보 평가': {'main': [m('후보 조회수')]},
+    '후보 조회수': {'main': [m('후보 화면 만들기')]},
     '후보 화면 만들기': {'main': [m('후보 선택')]},
     '후보 선택': {'main': [m('선택 정리')]},
     '선택 정리': {'main': [m('유튜브 원문')]},
