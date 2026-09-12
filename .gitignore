@@ -26,3 +26,7 @@ desktop.ini
 # 파이썬
 __pycache__/
 *.pyc
+
+# n8n 콘솔 로그 (start-n8n.ps1). 매 기동마다 새로 쓰인다.
+n8n/n8n.log
+n8n/n8n.prev.log
