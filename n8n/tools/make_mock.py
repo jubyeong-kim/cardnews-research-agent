@@ -164,24 +164,37 @@ const htmlField = fields.find(f => f.fieldType === 'html');
 if (!htmlField) throw new Error('조사 결과 html 필드가 없습니다.');
 const H = htmlField.html;
 
-if (!/<h3>유튜브 \d+개<\/h3>/.test(H)) throw new Error('유튜브 구역이 없습니다.');
-if (!/<h3>웹·블로그 \d+개<\/h3>/.test(H)) throw new Error('웹 구역이 없습니다.');
-if (H.indexOf('<h3>유튜브') > H.indexOf('<h3>웹·블로그')) {
+// 구역 제목은 h2 다. h3(16px)보다 크고 customCss 가 굵기·밑줄을 더한다.
+if (!/<h2>유튜브 \d+개<\/h2>/.test(H)) throw new Error('유튜브 구역이 없습니다.');
+if (!/<h2>웹·블로그 \d+개<\/h2>/.test(H)) throw new Error('웹 구역이 없습니다.');
+if (H.indexOf('<h2>유튜브') > H.indexOf('<h2>웹·블로그')) {
   throw new Error('유튜브 구역이 웹보다 뒤에 있습니다.');
 }
 if (!H.includes('form/cardnews-start-form')) throw new Error('다시 조사하기 링크가 없습니다.');
 // 25분짜리 vid0000004 는 영상 분석 상한(20분)을 넘으므로 미리 표시돼야 한다.
 if (!H.includes('영상 분석에서 제외')) throw new Error('긴 영상 경고가 없습니다.');
-if (!/\d+위 · \d+점/.test(H)) throw new Error('순위·점수 표기가 없습니다.');
+if (/체크박스에서/.test(H)) throw new Error('c1 안내 문구가 남아 있습니다.');
+if (/—\s*c\d+\s*</.test(H)) throw new Error('내부 id 가 화면에 노출됐습니다.');
 
 const cb = fields.find(f => f.fieldType === 'checkbox');
 if (!cb) throw new Error('체크박스 필드가 없습니다.');
 const opts = (cb.fieldOptions.values ?? cb.fieldOptions).map(o => o.option);
 if (opts.length < 2) throw new Error('후보 옵션이 2개 미만입니다: ' + opts.length);
 
-// 체크박스도 화면과 같은 순서여야 한다: 영상 먼저, 각 구역 안에서 점수 내림차순.
+// 옵션 번호는 1..N 이 순서대로여야 한다. 이 번호가 설명과 선택을 잇는
+// 유일한 열쇠라, 어긋나면 엉뚱한 후보가 선택된다.
+const nums = opts.map(o => Number((o.match(/^(\d+) /) || [])[1]));
+if (nums.some((n, k) => n !== k + 1)) {
+  throw new Error('옵션 번호가 1..N 순서가 아닙니다: ' + nums.join(','));
+}
+// 화면에도 같은 번호가 보여야 짝을 찾을 수 있다.
+for (const n of nums) {
+  if (!H.includes('<b>' + n + ' · ')) throw new Error('화면에 번호 ' + n + ' 이 없습니다.');
+}
+
+// 영상 먼저, 각 구역 안에서 점수 내림차순.
 const parsed = opts.map(o => ({
-  video: o.startsWith('[영상]'),
+  video: /· \[영상\]/.test(o),
   fit: Number((o.match(/(\d+)점/) || [])[1] ?? NaN),
 }));
 const firstWeb = parsed.findIndex(p => !p.video);
@@ -189,25 +202,27 @@ if (firstWeb !== -1 && parsed.slice(firstWeb).some(p => p.video)) {
   throw new Error('체크박스에서 영상과 웹이 섞여 있습니다: ' + opts.join(' | '));
 }
 for (const grp of [parsed.filter(p => p.video), parsed.filter(p => !p.video)]) {
-  for (let i = 1; i < grp.length; i++) {
-    if (Number.isFinite(grp[i].fit) && Number.isFinite(grp[i - 1].fit) && grp[i].fit > grp[i - 1].fit) {
+  for (let k = 1; k < grp.length; k++) {
+    if (Number.isFinite(grp[k].fit) && Number.isFinite(grp[k - 1].fit) && grp[k].fit > grp[k - 1].fit) {
       throw new Error('점수 내림차순이 아닙니다: ' + grp.map(p => p.fit).join(','));
     }
   }
 }
-console.log('[모의] 후보 화면 OK: ' + opts.length + '개, 점수 ' + parsed.map(p => p.fit).join('>'));
 
-// 영상 후보 2개를 고른다. 그냥 앞 2개를 고르면 라운드로빈 순서 때문에
-// 유튜브 1 + 웹 1 이 되어 Gemini 호출이 1건뿐이고, 모의 응답의 오류 경로가
-// 안 돈다. 아이디로 골라야 옵션 텍스트 형식에 의존하지 않는다.
-const vidIds = cands.filter(c => /[?&]v=|youtu\.be\//.test(c.url)).map(c => c.id);
-if (vidIds.length < 2) throw new Error('영상 후보가 2개 미만입니다: ' + vidIds.length);
-const picks = vidIds.slice(0, 2).map(id => {
-  const o = opts.find(t => t.endsWith('— ' + id) || t.endsWith('' + id));
-  if (!o) throw new Error('후보 ' + id + ' 에 해당하는 옵션을 못 찾았습니다.');
-  return o;
-});
-console.log('[모의] 후보 옵션 ' + opts.length + '개, 영상 2개 선택: ' + picks.join(' | '));
+// ordered 로 영상 후보 2개를 고른다. 번호 -> id 매핑을 실제로 태우는 검사다.
+const ordered = $json.ordered ?? [];
+if (ordered.length !== opts.length) {
+  throw new Error('ordered 와 옵션 수가 다릅니다: ' + ordered.length + ' vs ' + opts.length);
+}
+const byId = new Map(($json.candidates ?? []).map(c => [c.id, c]));
+const vIdx = ordered
+  .map((id, k) => ({ id, k }))
+  .filter(x => /[?&]v=|youtu\.be\//.test(String(byId.get(x.id) && byId.get(x.id).url)));
+if (vIdx.length < 2) throw new Error('영상 후보가 2개 미만입니다: ' + vIdx.length);
+const picks = vIdx.slice(0, 2).map(x => opts[x.k]);
+
+console.log('[모의] 후보 화면 OK: ' + opts.length + '개, 점수 '
+  + parsed.map(p => p.fit).join('>') + ' / 선택 ' + picks.join(' | '));
 return [{ json: { picks } }];
 """
 

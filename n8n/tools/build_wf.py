@@ -10,6 +10,32 @@ OUT  = ROOT + '/workflows/cardnews-mvp.json'
 # 아니라 webhookId 다 (README 참조).
 FORM_URL = 'http://localhost:5678/form/cardnews-start-form'
 
+# 후보 선택 화면에만 붙이는 CSS. n8n 폼을 실제로 띄워 마크업을 확인하고 짰다:
+#   <div class='inputs-wrapper'>
+#     <div class="form-group html">   … 설명
+#     <div>                           … label + div.multiselect (클래스 없음)
+# sanitizeCustomCss 는 태그만 걷어내고 CSS 는 통과시킨다 (&gt; 는 > 로 되돌린다).
+# 선택자가 빗나가도 조용히 무시될 뿐 폼은 그대로 뜬다.
+PICK_CSS = (
+    # 소스 구역 제목을 본문(12px)과 확실히 구분한다. div.html h2 는 20px.
+    'div.html h2{font-weight:800;margin:26px 0 10px;padding-bottom:6px;'
+    'border-bottom:3px solid #ff6d5a}'
+    'div.html h2:first-child{margin-top:2px}'
+    # 옵션 한 줄이 길어 줄바꿈이 생긴다.
+    '.multiselect-option{padding-top:10px}'
+    '.multiselect-option label{line-height:1.5;text-align:left}'
+    # 넓은 화면에서만 두 칸. 좁으면 지금처럼 위아래로 쌓인다.
+    # 폼 기본 폭이 448px 이라 데스크톱에서는 양옆이 비어 있었다.
+    '@media (min-width:1000px){'
+    ':root{--container-width:980px}'
+    '.inputs-wrapper{display:grid;grid-template-columns:minmax(0,1fr) 400px;'
+    'gap:28px;align-items:start}'
+    # 오른쪽(체크박스)만 따라오게 한다. 목록이 길면 그 안에서 스크롤된다.
+    '.inputs-wrapper>div:last-child{position:sticky;top:14px;'
+    'max-height:calc(100vh - 36px);overflow-y:auto}'
+    '}'
+)
+
 
 def cmd(session=False):
     s = ' -SessionId "{{ $json.sessionId }}"' if session else ''
@@ -305,7 +331,7 @@ const mmss = s => s == null ? '' : Math.floor(s / 60) + '분';
 // 영상 분석 상한. 여기서 걸릴 영상을 고르기 전에 알려 준다.
 const MAX_SEC = 20 * 60;
 
-const row = (c, rank) => {
+const row = (c, no) => {
   const meta = [
     he(c.source),
     c.channel ? he(c.channel) : '',
@@ -319,18 +345,20 @@ const row = (c, rank) => {
     ? '<br><b>※ ' + mmss(c.seconds) + ' 영상이라 Gemini 영상 분석에서 제외됩니다 (설명란만 사용)</b>'
     : '';
 
-  return '<p><b>' + rank + '위 · ' + (c.fit == null ? '점수 없음' : c.fit + '점') + ' — ' + he(c.title) + '</b>'
+  // 번호가 설명과 선택 목록을 잇는 유일한 열쇠다. 둘이 같은 번호를 쓰므로
+  // c1 같은 내부 id 를 사람에게 보일 이유가 없다.
+  return '<p><b>' + no + ' · ' + (c.fit == null ? '점수 없음' : c.fit + '점') + ' — ' + he(c.title) + '</b>'
     + '<br>' + meta
     + '<br>' + he(c.summary)
     + (c.value ? '<br><b>고른 이유</b> ' + he(c.value) : '')
     + (c.uncertainty ? '<br><b>불확실</b> ' + he(c.uncertainty) : '')
     + warn
-    + '<br><a href="' + he(c.url) + '" target="_blank" rel="noopener">원문 보기</a>'
-    + ' · 체크박스에서 <b>' + he(c.id) + '</b> 을 찾으세요</p>';
+    + '<br><a href="' + he(c.url) + '" target="_blank" rel="noopener">원문 보기</a></p>';
 };
 
-const section = (title, arr) => '<h3>' + title + ' ' + arr.length + '개</h3>'
-  + (arr.length ? arr.map((c, i) => row(c, i + 1)).join('') : '<p>없습니다.</p>');
+// h2 는 20px, 본문은 12px. customCss 가 굵기와 밑줄을 더한다.
+const section = (title, arr, from) => '<h2>' + title + ' ' + arr.length + '개</h2>'
+  + (arr.length ? arr.map((c, i) => row(c, from + i)).join('') : '<p>없습니다.</p>');
 
 const head = '<p><b>조사 기준</b> ' + he(prev.researchedAt) + ' · 최근 ' + prev.days + '일 · 후보 ' + candidates.length + '개</p>'
   + (prev.sourceErrors.length
@@ -343,17 +371,22 @@ const head = '<p><b>조사 기준</b> ' + he(prev.researchedAt) + ' · 최근 ' 
   + '<p><a href="' + FORM_URL_PLACEHOLDER + '">← 주제를 바꿔 처음부터 다시 조사하기</a>'
   + ' (새 조사가 시작되고 이 화면은 그대로 남습니다)</p>';
 
+// 화면 순서 = 선택 목록 순서 = 번호 순서. 셋이 같아야 눈으로 짝을 찾지 않는다.
+const shown = [...yt, ...web];
+
 const fields = [
   { fieldLabel: '조사 결과', fieldType: 'html',
-    html: head + section('유튜브', yt) + section('웹·블로그', web) },
+    html: head + section('유튜브', yt, 1) + section('웹·블로그', web, yt.length + 1) },
   {
     fieldLabel: '카드뉴스로 만들 것 (1~3개)', fieldName: 'picks', fieldType: 'checkbox',
-    // 화면에 보인 순서 그대로 둔다. 화면은 유튜브가 먼저인데 체크박스는
-    // 다른 순서면 고를 때마다 눈으로 다시 찾아야 한다.
-    fieldOptions: { values: [...yt, ...web].map(c =>
-      ({ option: (c.source === '유튜브' ? '[영상] ' : '[웹] ')
-          + (c.fit == null ? '' : c.fit + '점 ')
-          + cut(c.title, 54) + ' — ' + c.id })) },
+    // 왼쪽 설명을 안 봐도 고를 수 있게 판단 재료를 옵션에 다 넣는다:
+    // 번호 · 소스 · 점수 · 조회수 · 길이 · 제목.
+    fieldOptions: { values: shown.map((c, i) => ({ option:
+      (i + 1) + ' · ' + (c.source === '유튜브' ? '[영상]' : '[웹]')
+      + (c.fit == null ? '' : ' ' + c.fit + '점')
+      + (c.views != null ? ' · 조회 ' + num(c.views) : '')
+      + (c.seconds != null ? ' · ' + mmss(c.seconds) : '')
+      + ' — ' + cut(c.title, 70) })) },
     requiredField: true, limitSelection: 'range', minSelections: 1, maxSelections: 3,
   },
 ];
@@ -362,7 +395,10 @@ const fields = [
 // replacement pattern. Double it so a $ in a title survives intact.
 const formFields = JSON.stringify(fields).split('$').join('$$');
 
-return [{ json: { ...prev, candidates, sessionId: out.sessionId, formFields } }];
+// 번호 -> 후보 id. 선택 정리가 이걸로 되찾는다.
+const ordered = shown.map(c => c.id);
+
+return [{ json: { ...prev, candidates, ordered, sessionId: out.sessionId, formFields } }];
 """.strip().replace('FORM_URL_PLACEHOLDER', repr(FORM_URL))
 
 JS_PICKED = r"""
@@ -371,9 +407,14 @@ const prev = $('후보 화면 만들기').first().json;
 
 const picked = $json.picks ?? $json['카드뉴스로 만들 것 (1~3개)'] ?? [];
 const arr = Array.isArray(picked) ? picked : [picked];
-// The option text carries the id as a suffix, because n8n form options allow
-// exactly one key and have no separate value field.
-const ids = arr.map(s => (String(s).match(/—\s*(c\d+)\s*$/) || [])[1]).filter(Boolean);
+// 옵션 텍스트 맨 앞의 번호로 되찾는다. n8n 폼 옵션은 키가 option 하나뿐이고
+// 별도 value 가 없어 텍스트에 열쇠를 심어야 하는데, 화면에도 쓰는 번호를 쓰면
+// c1 같은 내부 id 를 사람에게 보이지 않아도 된다.
+const ordered = prev.ordered ?? [];
+const ids = arr
+  .map(s => Number((String(s).match(/^(\d+)\s/) || [])[1]))
+  .filter(n => Number.isFinite(n) && n >= 1 && n <= ordered.length)
+  .map(n => ordered[n - 1]);
 const chosen = prev.candidates.filter(c => ids.includes(c.id));
 if (!chosen.length) throw new Error('선택한 후보를 찾지 못했습니다: ' + JSON.stringify(arr));
 
@@ -1123,10 +1164,13 @@ def code(name, js, pos):
     return node(name, 'n8n-nodes-base.code', 2, {'jsCode': js}, pos)
 
 
-def form_page(name, json_output, pos, button):
+def form_page(name, json_output, pos, button, css=None):
+    opts = {'buttonLabel': button}
+    if css:
+        opts['customCss'] = css
     return node(name, 'n8n-nodes-base.form', 2.5, {
         'operation': 'page', 'defineForm': 'json', 'jsonOutput': json_output,
-        'options': {'buttonLabel': button},
+        'options': opts,
     }, pos, {'webhookId': 'cardnews-form-%d' % (_seq[0] + 1)})
 
 
@@ -1210,7 +1254,7 @@ nodes = [
                   'retryOnFail': True, 'maxTries': 3, 'waitBetweenTries': 2000}),
 
     code('후보 화면 만들기', JS_PICK_FORM, [1080, 0]),
-    form_page('후보 선택', '={{ $json.formFields }}', [1300, 0], '이걸로 만들기'),
+    form_page('후보 선택', '={{ $json.formFields }}', [1300, 0], '이걸로 만들기', PICK_CSS),
     code('선택 정리', JS_PICKED, [1520, 0]),
 
     # Fetch the sources ourselves. Asking the model to open these pages does
@@ -1373,6 +1417,51 @@ for src, spec in connections.items():
     for branch in spec['main']:
         for link in branch:
             assert link['node'] in names, 'unknown target node: %s' % link['node']
+
+# customCss 가 n8n 의 sanitizeCustomCss 를 통과하는지 확인한다. 이 함수는
+# allowedTags 를 비운 sanitize-html 을 돌린 뒤 &gt; 만 > 로 되돌린다. 걸리는
+# 문자를 쓰면 CSS 가 조용히 잘려서 레이아웃만 안 먹는다 — 오류는 안 난다.
+import subprocess, tempfile, os as _os
+
+_CSS_JS = r"""
+const path = require('path');
+const fs = require('fs');
+const base = path.join(process.env.LOCALAPPDATA, 'npm-cache', '_npx');
+// 캐시 폴더 이름은 npx 가 정하므로 sanitize-html 이 있는 곳을 찾아 쓴다.
+let mod = null;
+for (const d of fs.readdirSync(base)) {
+  const p = path.join(base, d, 'node_modules', 'sanitize-html');
+  if (fs.existsSync(p)) { mod = p; break; }
+}
+if (!mod) { console.log('SKIP sanitize-html 을 찾지 못했습니다'); process.exit(0); }
+const sanitizeHtml = require(mod);
+const css = fs.readFileSync(process.argv[2], 'utf8');
+const out = sanitizeHtml(css, { allowedTags: [], allowedAttributes: {} })
+  .replace(/&gt;/g, '>').replace(/&amp;(?!(?:lt|gt|amp);)/g, '&');
+if (out === css) { console.log('OK'); process.exit(0); }
+let i = 0;
+while (i < Math.min(css.length, out.length) && css[i] === out[i]) i++;
+console.log('BAD ' + css.length + ' -> ' + out.length);
+console.log('  원본 …' + css.slice(Math.max(0, i - 50), i + 50));
+console.log('  결과 …' + out.slice(Math.max(0, i - 50), i + 50));
+process.exit(1);
+"""
+
+_cf = tempfile.NamedTemporaryFile('w', suffix='.css', delete=False, encoding='utf-8')
+_cf.write(PICK_CSS)
+_cf.close()
+_jf = tempfile.NamedTemporaryFile('w', suffix='.js', delete=False, encoding='utf-8')
+_jf.write(_CSS_JS)
+_jf.close()
+_r = subprocess.run(['node', _jf.name, _cf.name], capture_output=True, text=True, encoding='utf-8')
+_os.unlink(_cf.name)
+_os.unlink(_jf.name)
+_msg = (_r.stdout or '').strip()
+if _r.returncode != 0:
+    print(_msg or _r.stderr)
+    raise SystemExit('customCss 가 n8n 검사기를 통과하지 못했습니다 — 쓰지 않았습니다.')
+# node 가 없거나 캐시를 못 찾으면 검사를 못 한 것이지 CSS 가 나쁜 게 아니다.
+print('customCss 검사: %s' % (_msg or '검사기 없음 (건너뜀)'))
 
 # Run the verdict rule against fixtures, using the SAME snippet the workflow
 # embeds. 실행 46 에서 조합된 이름이 not_in_source 로 찍혀 잡음이 됐다.
