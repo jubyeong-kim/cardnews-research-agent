@@ -8,6 +8,14 @@ RUNS = ROOT + '/runs'
 OUT  = ROOT + '/workflows/cardnews-mvp.json'
 # 후보 화면의 "다시 조사하기" 링크가 가리킬 곳. 폼 경로는 노드의 path 가
 # 아니라 webhookId 다 (README 참조).
+# 임시 점검용. 켜면 Claude 가 매 실행마다 반드시 한 번 되묻는다.
+#
+# 왜 필요한가: 되묻는 기준이 "정말 갈릴 때만" 이라 실키 다섯 번 연속 한 번도
+# 안 돌았다. 문턱이 높은 것은 의도지만, 그 결과 질문 화면이 브라우저에서 한
+# 번도 렌더된 적이 없고 답변 되받기도 돌아본 적이 없다. 한 번 태워서 확인한
+# 뒤 False 로 되돌린다. True 인 채로 두면 매번 쓸데없이 되묻는다.
+FORCE_QUESTION = True
+
 FORM_URL = 'http://localhost:5678/form/cardnews-start-form'
 
 # 후보 선택 화면에만 붙이는 CSS. n8n 폼을 실제로 띄워 마크업을 확인하고 짰다:
@@ -736,6 +744,15 @@ fs.writeFileSync(promptFile, prompt, 'utf8');
 
 return [{ json: { ...prev, chosen, promptFile } }];
 """.strip()
+
+if FORCE_QUESTION:
+    JS_DEEP = JS_DEEP.replace(
+        "  '9. 대상 독자나 편집 방향에 따라 결과가 크게 달라질 때만 되묻는다.',",
+        "  '9. 이번 실행은 반드시 한 번 되물어라. 질문 분기 점검용이다.',\n"
+        "  '   독자나 편집 방향을 정하는 질문 하나를 골라 need_input 으로 내라.',")
+    JS_DEEP = JS_DEEP.replace(
+        "  '되물어야 하면 (정말 갈릴 때만, 한 번):',",
+        "  '되물어라 (이번에는 반드시, 한 번):',")
 
 JS_PARSE = r"""
 let out;
@@ -1551,3 +1568,12 @@ os.makedirs(os.path.dirname(OUT), exist_ok=True)
 with io.open(OUT, 'w', encoding='utf-8') as fh:
     json.dump(wf, fh, ensure_ascii=False, indent=2)
 print('wrote %s  (%d nodes)' % (OUT, len(nodes)))
+if FORCE_QUESTION:
+    print('')
+    # 콘솔이 cp949 라 em dash 같은 글자에서 죽는다. 빌드 마지막에 죽으면
+    # deploy.ps1 이 빌드 실패로 본다. ASCII 로만 쓴다.
+    print('*' * 60)
+    print('*  FORCE_QUESTION = True : 매 실행마다 반드시 되묻습니다.  *')
+    print('*  점검이 끝나면 build_wf.py 에서 False 로 되돌리고        *')
+    print('*  deploy.ps1 을 다시 돌리세요.                            *')
+    print('*' * 60)
