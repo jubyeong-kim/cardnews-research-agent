@@ -14,7 +14,7 @@ OUT  = ROOT + '/workflows/cardnews-mvp.json'
 # 안 돌았다. 문턱이 높은 것은 의도지만, 그 결과 질문 화면이 브라우저에서 한
 # 번도 렌더된 적이 없고 답변 되받기도 돌아본 적이 없다. 한 번 태워서 확인한
 # 뒤 False 로 되돌린다. True 인 채로 두면 매번 쓸데없이 되묻는다.
-FORCE_QUESTION = True
+FORCE_QUESTION = False
 
 FORM_URL = 'http://localhost:5678/form/cardnews-start-form'
 
@@ -716,6 +716,9 @@ const prompt = [
   '8. 본문을 못 가져온 후보는 근거를 "미확인"으로 적는다.',
   '9. 대상 독자나 편집 방향에 따라 결과가 크게 달라질 때만 되묻는다.',
   '',
+  '   질문·선택지·why 는 사람이 읽는 글이다. c1 같은 후보 기호를 쓰지 말고',
+  '   후보 제목이나 품목 이름으로 가리켜라. 화면에는 그 기호가 안 보인다.',
+  '',
   '되물어야 하면 (정말 갈릴 때만, 한 번):',
   '{"status":"need_input","question":"...","options":["...","..."],"why":"이 답에 따라 무엇이 달라지는지 한 줄"}',
   '',
@@ -770,6 +773,25 @@ if (res.status !== 'need_input' && res.status !== 'result') {
 // Context comes from the first pass. runDir / sessionId / candidates do not
 // change when the question or revision loop sends execution back through here.
 const ctx = $('심층조사 지시').first().json;
+
+// 사람이 읽는 글에서 내부 id 를 제목으로 바꾼다. 후보 화면은 c1 대신 번호를
+// 쓰므로 질문에 "(c9)" 가 섞이면 사용자는 그게 뭔지 알 방법이 없다. 실행 54
+// 에서 실제로 그렇게 나왔다. 프롬프트로도 막지만 모델이 흘리므로 여기서
+// 확실히 지운다.
+const titleOf = new Map((ctx.chosen ?? []).map(c => [c.id, String(c.title ?? '')]));
+const deId = s => String(s ?? '').replace(/\(?\b(c\d+)\b\)?/g, (m, id) => {
+  const t = titleOf.get(id);
+  if (!t) return m;                       // 고른 후보가 아니면 건드리지 않는다
+  const short = t.length > 22 ? t.slice(0, 21) + '…' : t;
+  return m.startsWith('(') ? '(' + short + ')' : short;
+});
+
+if (res.status === 'need_input') {
+  res.question = deId(res.question);
+  res.why = deId(res.why);
+  res.options = (res.options ?? []).map(deId);
+}
+
 return [{ json: { ...ctx, ...res, sessionId: out.sessionId || ctx.sessionId } }];
 """.strip()
 
