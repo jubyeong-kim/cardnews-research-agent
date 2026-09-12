@@ -866,6 +866,7 @@ JS_SHOTS = r"""
 const sb = $json.storyboard ?? {};
 const items = sb.items ?? [];
 const checks = $json.itemChecks ?? [];
+const topic = $('선택 정리').first().json.topic ?? '';
 
 // Only look for shots for items a card may actually use.
 const byName = new Map(checks.map(c => [c.name, c.verdict]));
@@ -888,7 +889,13 @@ return usable.map(i => ({
     storyboard: sb,
     itemChecks: checks,
     shotFor: i.name,
-    shotQuery: String(i.name).split(/[(（]/)[0].trim() + ' 제품',
+    // 주제어를 반드시 넣는다. 실측(runs/_probe/shot-query.json): "곤약 젤리 제품"
+    // 은 hanpoom·coupang·kurly 같은 한국 쇼핑몰로 가서 한국 내수용 포장
+    // 사진이 나왔다. 실제로 카드에 한글 포장 사진이 붙어 반려됐다.
+    // "곤약 젤리 오사카 여행 기념품" 으로 바꾸니 일본 현지 매대·기념품
+    // 사진이 나왔다. 교차 검증 검색어에 이미 적용한 규칙인데 여기만 빠져
+    // 있었다.
+    shotQuery: (String(i.name).split(/[(（]/)[0].trim() + ' ' + topic).trim(),
     skip: false,
   },
 }));
@@ -923,7 +930,17 @@ const shots = [];
 asked.forEach((a, idx) => {
   if (a.skip || !a.shotFor) return;
   const j = found[idx] ?? {};
-  const imgs = (j.images ?? []).slice(0, 3).map(x => (typeof x === 'string')
+  // 수정 요청이 오면 다음 묶음을 보여준다. 이 노드는 승인 화면을 그릴 때마다
+  // 다시 도는데, 같은 사진만 계속 내보내면 "다른 사진 찾아줘" 가 아무 일도
+  // 하지 않는다. 실제로 그렇게 반려된 적이 있다.
+  // 후보 목록을 고리처럼 돌면서 step 개를 꺼낸다. take 가 pool 보다 클 수
+  // 없으므로 한 묶음 안에 같은 사진이 두 번 들어가지 않는다.
+  const pool = j.images ?? [];
+  const step = 4;
+  const take = Math.min(step, pool.length);
+  const off = pool.length ? ($runIndex * step) % pool.length : 0;
+  const imgs = Array.from({ length: take }, (_, k) => pool[(off + k) % pool.length])
+    .map(x => (typeof x === 'string')
     ? { url: x, desc: '' }
     : { url: x.url ?? '', desc: String(x.description ?? '') });
   shots.push({
@@ -947,7 +964,10 @@ const html = '<p><b>독자</b> ' + he(sb.audience) + '<br><b>앵글</b> ' + he(s
       ? '<p><b>후킹 문구 후보</b></p><ul>' + sb.hooks.map(h => '<li>' + he(h) + '</li>').join('') + '</ul>'
       : '')
   + (shots.length
-      ? '<p><b>제품컷 후보</b> — 이용 조건은 출처 페이지에서 직접 확인하세요</p>'
+      ? '<p><b>제품컷 후보</b> — 이용 조건은 출처 페이지에서 직접 확인하세요.'
+        + ($runIndex > 0 ? ' 수정 요청 ' + $runIndex + '회차라 다른 묶음을 보여줍니다.'
+                         : ' 사진이 마음에 안 들면 수정 요청하면 다른 묶음이 나옵니다.')
+        + '</p>'
         + shots.map(s => '<p>' + he(s.name) + '<br>'
             + (s.images.length
                 ? s.images.map(im => '<img src="' + he(im.url) + '" alt="' + he(s.name) + '">'
@@ -1336,7 +1356,7 @@ nodes = [
         'url': 'https://api.tavily.com/search',
         'authentication': 'genericCredentialType', 'genericAuthType': 'httpHeaderAuth',
         'sendBody': True, 'specifyBody': 'json',
-        'jsonBody': "={{ JSON.stringify({ query: $json.shotQuery, max_results: 5,"
+        'jsonBody': "={{ JSON.stringify({ query: $json.shotQuery, max_results: 8,"
                     " search_depth: 'basic', include_images: true,"
                     " include_image_descriptions: true }) }}",
         'options': {},

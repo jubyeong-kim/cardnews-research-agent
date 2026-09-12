@@ -85,6 +85,14 @@ VIEWS = {'kind': 'youtube#videoListResponse', 'items': [
      'contentDetails': {'duration': 'PT5M11S'}},
 ]}
 
+SHOTS = {
+    'query': '모의 제품컷',
+    'results': [{'url': 'https://example-shop.jp/item/1'},
+                {'url': 'https://m.blog.naver.com/someone/222'}],
+    'images': [{'url': 'https://img.example.jp/shot%d.jpg' % k,
+                'description': 'Mock product shot %d' % k} for k in range(1, 9)],
+}
+
 GEMINI_OK = {
     'id': 'v1_mock', 'object': 'interaction', 'status': 'completed',
     'model': 'gemini-3.5-flash', 'service_tier': 'standard',
@@ -253,7 +261,36 @@ if (!st.includes('영상 분석 (Gemini')) throw new Error('source-text.txt 에 
 if (!st.includes('코로로 젤리 [01:24]')) throw new Error('영상 분석 품목·시각이 원문에 없습니다.');
 console.log('[모의] 영상 분석 접힘 ' + sf.watched.length + '건 / 오류 ' + sf.videoErrors.length + '건');
 
-console.log('[모의] 스토리보드 미리보기 ' + html.html.length + '자, 승인 제출');
+console.log('[모의] 스토리보드 미리보기 ' + html.html.length + '자 (' + $runIndex + '회차)');
+
+// 제품컷이 화면에 실제로 붙었는지. 실행 50 에서 여기 사진이 문제가 됐다.
+const shotsNow = JSON.parse(fs.readFileSync(runDir + '/product-shots.json', 'utf8'));
+const urlsNow = shotsNow.flatMap(s => s.images.map(i => i.url));
+if (!urlsNow.length) throw new Error('제품컷이 하나도 안 붙었습니다.');
+
+// 검색어에 주제어가 들어갔는지. 안 들어가면 한국 쇼핑몰 사진이 나온다.
+const topic = $('선택 정리').first().json.topic;
+const noTopic = shotsNow.filter(s => !s.query.includes(topic));
+if (noTopic.length) {
+  throw new Error('검색어에 주제어가 없습니다: ' + noTopic.map(s => s.query).join(' | '));
+}
+
+const memo = runDir + '/MOCK-shots-pass0.json';
+if ($runIndex === 0) {
+  // 첫 회차는 수정을 요청한다. 이 분기는 지금까지 한 번도 안 돌았다.
+  fs.writeFileSync(memo, JSON.stringify(urlsNow), 'utf8');
+  console.log('[모의] 수정 요청 제출 (사진 ' + urlsNow.length + '장)');
+  return [{ json: { decision: '수정 요청',
+                    revision: '곤약젤리 사진에 한글 포장이 보입니다. 다른 사진으로 바꿔 주세요.' } }];
+}
+
+// 둘째 회차: 사진이 실제로 다른 묶음으로 바뀌었는지.
+const before = JSON.parse(fs.readFileSync(memo, 'utf8'));
+if (JSON.stringify(before) === JSON.stringify(urlsNow)) {
+  throw new Error('수정 요청 후에도 사진이 그대로입니다: ' + urlsNow.slice(0, 2).join(', '));
+}
+console.log('[모의] 수정 후 사진 바뀜: ' + before[0] + ' -> ' + urlsNow[0]);
+console.log('[모의] 승인 제출');
 return [{ json: { decision: '승인', revision: '' } }];
 """
 
@@ -314,6 +351,19 @@ g['parameters'] = {'jsCode': chr(10).join([
 g.pop('onError', None)
 g.pop('retryOnFail', None)
 g.pop('credentials', None)
+
+# 2c. 제품컷 검색 -> canned. 실제 Tavily 호출을 막고, 사진 회전 검사가
+#     실제 목록을 보게 한다.
+sh = by_name['제품컷 검색']
+sh['type'] = 'n8n-nodes-base.code'
+sh['typeVersion'] = 2
+sh['parameters'] = {'jsCode': chr(10).join([
+    'const canned = %s;' % json.dumps(SHOTS, ensure_ascii=False),
+    'return $input.all().map(() => ({ json: canned }));',
+])}
+sh.pop('onError', None)
+sh.pop('retryOnFail', None)
+sh.pop('credentials', None)
 
 # 3. form pages -> validator + canned submission
 for name, js in (('후보 선택', MOCK_PICK), ('질문', MOCK_QUESTION), ('스토리보드 승인', MOCK_APPROVE)):
