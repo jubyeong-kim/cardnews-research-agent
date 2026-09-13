@@ -13,7 +13,9 @@
   Usage:
     ask-claude.ps1 -PromptFile <path> [-SessionId <id>]
 
-  stdout on success: {"sessionId":"...","body":<whatever JSON Claude produced>}
+  stdout on success:
+    {"sessionId":"...","body":<whatever JSON Claude produced>,"usage":{...}}
+  usage 는 이 호출에서 쓴 것의 합계다 (JSON 수리가 돌았으면 그것까지 포함).
          on failure: {"status":"error","reason":"...","detail":"..."}
 
   The body is passed through verbatim -- PowerShell 5.1's JSON parser never
@@ -131,8 +133,25 @@ function Invoke-Claude([string]$text, [string]$session) {
   $out = [string]$envelope.result
   if ([string]::IsNullOrWhiteSpace($out)) { Fail 'claude_no_result_field' (Clip $raw) }
 
+  # 사용량과 비용은 봉투에 이미 들어 있다. 버리면 어느 단계가 비싼지 알 수
+  # 없다. 없는 CLI 버전도 있으므로 없으면 0 이 된다.
+  $u = $envelope.usage
+  # 해시테이블이 아니라 PSCustomObject 로 담는다. PowerShell 5.1 의
+  # Measure-Object 는 해시테이블의 키를 속성으로 보지 못한다.
+  $script:Calls += [PSCustomObject]@{
+    durationMs   = [int]($envelope.duration_ms)
+    costUsd      = [double]($envelope.total_cost_usd)
+    inputTokens  = [int]($u.input_tokens)
+    outputTokens = [int]($u.output_tokens)
+    cacheCreate  = [int]($u.cache_creation_input_tokens)
+    cacheRead    = [int]($u.cache_read_input_tokens)
+  }
   return @{ text = $out; sid = ([string]$envelope.session_id) }
 }
+
+# 수리 루프가 여러 번 부르므로 호출마다 쌓는다. 마지막 것만 쓰면 수리
+# 비용이 통째로 안 보인다.
+$script:Calls = @()
 
 if (-not (Test-Path -LiteralPath $PromptFile)) { Fail 'prompt_file_missing' $PromptFile }
 $prompt = Get-Content -LiteralPath $PromptFile -Raw -Encoding UTF8
@@ -177,5 +196,17 @@ if ($null -ne $err) {
 # Strip anything that could break out of the string we are about to build.
 $sid = $r.sid -replace '[^A-Za-z0-9_-]', ''
 
-[Console]::Out.Write('{"sessionId":"' + $sid + '","body":' + $body + '}')
+# 합계를 같이 내보낸다. calls 가 1보다 크면 JSON 수리가 돌았다는 뜻이고,
+# 그 자체가 봐야 할 신호다.
+$sum = @{
+  calls        = $script:Calls.Count
+  durationMs   = ($script:Calls | Measure-Object durationMs   -Sum).Sum
+  costUsd      = ($script:Calls | Measure-Object costUsd      -Sum).Sum
+  inputTokens  = ($script:Calls | Measure-Object inputTokens  -Sum).Sum
+  outputTokens = ($script:Calls | Measure-Object outputTokens -Sum).Sum
+  cacheCreate  = ($script:Calls | Measure-Object cacheCreate  -Sum).Sum
+  cacheRead    = ($script:Calls | Measure-Object cacheRead    -Sum).Sum
+}
+$usageJson = $sum | ConvertTo-Json -Compress
+[Console]::Out.Write('{"sessionId":"' + $sid + '","body":' + $body + ',"usage":' + $usageJson + '}')
 exit 0

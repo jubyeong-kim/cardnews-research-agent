@@ -53,6 +53,26 @@ def cmd(session=False):
 
 # ---------------------------------------------------------------- JS snippets
 
+# 단계마다 한 줄씩 쌓는다. 집계는 tools/metrics.py 가 한다 — 노드 안에서
+# 집계하면 같은 계산이 노드마다 복사된다.
+#
+# 기록 실패가 실행을 막으면 안 된다. 숫자가 없는 것보다 카드뉴스를 못 만드는
+# 편이 나쁘다. 그래서 전부 삼킨다.
+#
+# code() 가 모든 Code 노드 앞에 이걸 붙인다. 필요한 노드에만 넣으면 나중에
+# 마크를 추가할 때 "이 노드엔 없네" 를 매번 확인해야 한다.
+JS_MARK = r"""
+const mark = (runDir, stage, extra) => {
+  try {
+    require('fs').appendFileSync(
+      runDir + '/metrics.jsonl',
+      JSON.stringify(Object.assign({ stage, at: Date.now() }, extra || {})) + '\n',
+      'utf8');
+  } catch (e) { /* 기록 실패는 실행을 막지 않는다 */ }
+};
+""".strip()
+
+
 JS_PREP = r"""
 const fs = require('fs');
 const f = $input.first().json;
@@ -71,6 +91,8 @@ const after = new Date(now.getTime() - days * 86400000);
 // would become an escape sequence. Node accepts / on Windows.
 const runDir = '__RUNS__/' + $execution.id;
 fs.mkdirSync(runDir, { recursive: true });
+
+mark(runDir, '시작', { topic, days });
 
 return [{ json: {
   topic, purpose, days,
@@ -270,6 +292,12 @@ const promptFile = prep.runDir + '/prompt-1.txt';
 fs.writeFileSync(promptFile, prompt, 'utf8');
 fs.writeFileSync(prep.runDir + '/candidates-raw.json', JSON.stringify(candidates, null, 2), 'utf8');
 
+mark(prep.runDir, '조사', {
+  apiCounts, raw: raw.length, candidates: candidates.length,
+  bySource: candidates.reduce((a, c) => (a[c.source] = (a[c.source] || 0) + 1, a), {}),
+  errors: sourceErrors.length,
+});
+
 return [{ json: { ...prep, candidates, candidateVideoIds, sourceErrors, promptFile } }];
 """.strip()
 
@@ -403,6 +431,8 @@ const fields = [
 // replacement pattern. Double it so a $ in a title survives intact.
 const formFields = JSON.stringify(fields).split('$').join('$$');
 
+mark(prev.runDir, '후보평가', Object.assign({ tool: 'claude' }, out.usage || {}));
+
 // 번호 -> 후보 id. 선택 정리가 이걸로 되찾는다.
 const ordered = shown.map(c => c.id);
 
@@ -447,6 +477,8 @@ const withVid = chosen.map(c => ({ ...c, videoId: videoIdOf(c.url) }));
 
 const videoIds = [...new Set(withVid.map(c => c.videoId).filter(Boolean))];
 const webUrls = [...new Set(withVid.filter(c => !c.videoId).map(c => c.url))];
+
+mark(prev.runDir, '후보선택(사람)', { picked: chosen.length, videos: videoIds.length });
 
 return [{ json: { ...prev, chosen: withVid, videoIds: videoIds.join(','), webUrls } }];
 """.strip()
@@ -742,6 +774,30 @@ const prompt = [
   '- JSON 하나만 출력하고 다른 문장은 쓰지 마라.',
 ].join('\n');
 
+// Gemini 토큰은 응답에 들어 있다. 버리면 영상 분석이 얼마나 드는지 모른다.
+let gTok = 0, gVideo = 0;
+try {
+  for (const it of $('제미나이 영상 분석').all()) {
+    const p = JSON.parse(String(it.json.data ?? '{}'));
+    for (const o of (Array.isArray(p) ? p : [p])) {
+      gTok += Number(o?.usage?.total_tokens ?? 0);
+      for (const m of (o?.usage?.input_tokens_by_modality ?? [])) {
+        if (m.modality === 'video') gVideo += Number(m.tokens ?? 0);
+      }
+    }
+  }
+} catch (e) { /* 노드가 실패했으면 0 */ }
+
+// 한 줄로 합친다. 둘을 나눠 찍으면 같은 순간이라 뒤엣것이 0.0초로 나오고,
+// Gemini 호출에 걸린 시간은 앞엣것에 숨는다. 이 구간은 유튜브·Tavily·Gemini
+// 를 한꺼번에 거치므로 한 단계로 보는 편이 정직하다.
+mark(prev.runDir, '원문확보·영상분석', {
+  tool: 'gemini',
+  verified, total: chosen.length, extractFailed: extractFailed.length,
+  videos: watched.size, videoErrors: videoErrors.length,
+  totalTokens: gTok, videoTokens: gVideo,
+});
+
 const promptFile = prev.runDir + '/prompt-2.txt';
 fs.writeFileSync(promptFile, prompt, 'utf8');
 
@@ -791,6 +847,9 @@ if (res.status === 'need_input') {
   res.why = deId(res.why);
   res.options = (res.options ?? []).map(deId);
 }
+
+mark(ctx.runDir, '심층조사', Object.assign(
+  { tool: 'claude', round: $runIndex, status: res.status }, out.usage || {}));
 
 return [{ json: { ...ctx, ...res, sessionId: out.sessionId || ctx.sessionId } }];
 """.strip()
@@ -992,6 +1051,11 @@ asked.forEach((a, idx) => {
 
 // Park these on disk so 저장 reads back exactly what was approved, instead of
 // guessing which run of this node the revision loop landed on.
+mark(runDir, '검증·제품컷', {
+  round: $runIndex, items: itemChecks.length, cards: cards.length,
+  shots: shots.length, images: shots.reduce((n, s) => n + s.images.length, 0),
+});
+
 fs.writeFileSync(runDir + '/storyboard-latest.json', JSON.stringify(sb, null, 2), 'utf8');
 fs.writeFileSync(runDir + '/product-shots.json', JSON.stringify(shots, null, 2), 'utf8');
 
@@ -1188,9 +1252,35 @@ const sources = [
 ].join('\n');
 fs.writeFileSync(ctx.runDir + '/sources.md', sources, 'utf8');
 
+// items 는 n8n Code 노드의 레거시 전역(입력 아이템 배열)이라 여기서
+// 쓰면 스토리보드 품목이 아니라 입력 개수가 찍힌다. 실제로 1 이 나왔다.
+mark(ctx.runDir, '저장', { cards: cards.length, items: (sb.items ?? []).length });
+
+// 완료 화면에 띄울 요약. 자세한 표는 tools/metrics.py 가 낸다 — 여기서는
+// 화면 한 줄에 들어갈 만큼만 센다.
+//
+// 사람이 폼 앞에서 기다린 시간은 빼야 한다. 안 빼면 "20분 걸림" 이 모델이
+// 느린 건지 커피를 마신 건지 구분이 안 된다.
+let took = '기록 없음';
+try {
+  const HUMAN = ['후보선택(사람)'];
+  const rows = require('fs').readFileSync(ctx.runDir + '/metrics.jsonl', 'utf8')
+    .split('\n').filter(Boolean).map(l => JSON.parse(l)).sort((a, b) => a.at - b.at);
+  let machine = 0, human = 0, cost = 0, tokens = 0;
+  rows.forEach((r, i) => {
+    const ms = i === 0 ? 0 : r.at - rows[i - 1].at;
+    if (HUMAN.includes(r.stage)) human += ms; else machine += ms;
+    cost += Number(r.costUsd || 0);
+    tokens += Number(r.inputTokens || 0) + Number(r.outputTokens || 0) + Number(r.totalTokens || 0);
+  });
+  const mmss = ms => Math.floor(ms / 60000) + '분 ' + Math.round((ms % 60000) / 1000) + '초';
+  took = '기계 ' + mmss(machine) + ' · 기다림 ' + mmss(human)
+       + ' · ' + tokens.toLocaleString() + '토큰 · $' + cost.toFixed(4);
+} catch (e) { /* 기록이 없어도 저장은 끝난 것이다 */ }
+
 return [{ json: {
-  runDir: ctx.runDir, cards: cards.length,
-  files: 'storyboard.json, script.md, sources.md, selection.json, candidates-raw.json',
+  runDir: ctx.runDir, cards: cards.length, took,
+  files: 'storyboard.json, script.md, sources.md, metrics.jsonl',
 } }];
 """.strip()
 
@@ -1220,7 +1310,10 @@ def node(name, ntype, tv, params, pos, extra=None):
 
 
 def code(name, js, pos):
-    return node(name, 'n8n-nodes-base.code', 2, {'jsCode': js}, pos)
+    # mark() 를 모든 Code 노드에 넣어 둔다. 쓰지 않는 노드에서는 8줄 낭비지만,
+    # 노드마다 넣고 빼는 것보다 어긋날 일이 없다.
+    return node(name, 'n8n-nodes-base.code', 2,
+                {'jsCode': JS_MARK + '\n\n' + js}, pos)
 
 
 def form_page(name, json_output, pos, button, css=None):
@@ -1415,8 +1508,10 @@ nodes = [
     node('완료', 'n8n-nodes-base.form', 2.5, {
         'operation': 'completion', 'respondWith': 'text',
         'completionTitle': '카드뉴스 원고 완성',
-        'completionMessage': "={{ '카드 ' + $json.cards + '장.\\n저장 위치: ' + $json.runDir"
-                             " + '\\n파일: ' + $json.files }}",
+        'completionMessage': "={{ '카드 ' + $json.cards + '장.\\n' + $json.took"
+                             " + '\\n\\n저장 위치: ' + $json.runDir"
+                             " + '\\n파일: ' + $json.files"
+                             " + '\\n\\n단계별 표: python tools/metrics.py ' + $json.runDir.split('/').pop() }}",
         'options': {},
     }, [4600, -40], {'webhookId': 'cardnews-form-done'}),
 ]
