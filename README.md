@@ -11,6 +11,9 @@ n8n 워크플로 하나(노드 30개)로 돌아가며, 지금까지 실제 주�
 `card-news-workflow-kit/` 은 과제와 함께 **받은 원본 자료**이고, PRD.md 는
 그것을 읽고 제 도메인에 맞게 다시 쓴 것입니다.
 
+**실험과 평가는 [EVALUATION.md](EVALUATION.md) 에 있습니다.** 실제 주제로 돌린
+결과, 세팅을 바꿔 가며 잰 것, 실패한 실행과 원인이 표로 정리돼 있습니다.
+
 ---
 
 ## 무엇을 해결하려고 만들었나
@@ -240,6 +243,7 @@ powershell -ExecutionPolicy Bypass -File n8n\test-mock.ps1
 
 ```
 PRD.md                    ★ 이 저장소의 요구사항 정의서
+EVALUATION.md             ★ 실험·평가·실패 분석
 card-news-workflow-kit/   과제와 함께 받은 원본 자료 (내가 쓴 것이 아님)
 n8n/
   agents/                 단계별 담당 문서. 00-총괄.md 부터 읽으세요
