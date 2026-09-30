@@ -36,3 +36,9 @@ n8n/n8n.prev.log
 사업검토노트.md
 사업계획서.md
 캐리어플랫폼_사업검토노트.docx
+
+# 뉴스레터 에이전트는 과제 제출용 별도 저장소다. 여기서는 무시한다.
+souvenir-newsletter/
+
+# 세관 에이전트도 별도 저장소다. 여기서는 무시한다.
+souvenir-customs-agent/
